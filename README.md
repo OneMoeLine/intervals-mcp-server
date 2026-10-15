@@ -117,3 +117,6 @@ pretty-printed output roughly doubles token cost for no benefit.
   so they carry no `readOnlyHint`/`destructiveHint` annotations and no
   `outputSchema`.
 - No automated tests.
+- `list_activities` returns every field the API offers (~200 per activity, mostly
+  null), unlike `search_activities` which returns a lean 9-field summary. A
+  field projection would cut its cost dramatically.

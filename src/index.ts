@@ -145,7 +145,7 @@ server.tool(
       .min(1)
       .max(200)
       .optional()
-      .describe("Maximum number of results (default 20)"),
+      .describe("Maximum number of results (the API returns 30 by default)"),
   },
   async ({ query, limit }) => {
     const params: Record<string, string> = { q: query };
