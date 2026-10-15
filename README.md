@@ -93,6 +93,26 @@ reduced, the response includes a `downsampled` field reporting the original and
 returned point counts. Pass `types` to fetch only the channels you need
 (e.g. `["watts","heartrate"]`) and `max_points` to change the resolution.
 
+**Activity and event records are trimmed.** The API returns a fixed, very wide
+record — 184 fields per activity and 62 per calendar event, with roughly half
+null for any given sport. `list_activities`, `get_activity`, `list_events` and
+`get_event` therefore return a compact summary by default (30 fields for
+activities, 14 for events, omitting the `workout_doc` workout structure).
+Measured against real data:
+
+| Call | Default | Full | Saving |
+| --- | --- | --- | --- |
+| `list_activities`, 14 activities | 10.9 KB | 63.8 KB | 83% |
+| `get_activity`, one activity | 0.9 KB | 4.8 KB | 82% |
+| `list_events`, 43 events | 14.9 KB | 91.9 KB | 84% |
+
+Pass `fields` to choose exactly what you want — `fields: ["id","name",
+"icu_training_load"]` returns those three and nothing else — or
+`fields: ["*"]` for the complete record. Because the API's key set is fixed
+(inapplicable metrics come back null rather than absent), a field name that
+matches no record is treated as a typo: the call fails and lists the valid
+field names so the mistake can be corrected in one step.
+
 **Dates are validated locally.** Date inputs must be `YYYY-MM-DD`
 (`create_event` also accepts `YYYY-MM-DDTHH:MM:SS`). Malformed values fail
 immediately with an actionable message rather than producing a confusing 422
@@ -117,6 +137,3 @@ pretty-printed output roughly doubles token cost for no benefit.
   so they carry no `readOnlyHint`/`destructiveHint` annotations and no
   `outputSchema`.
 - No automated tests.
-- `list_activities` returns every field the API offers (~200 per activity, mostly
-  null), unlike `search_activities` which returns a lean 9-field summary. A
-  field projection would cut its cost dramatically.

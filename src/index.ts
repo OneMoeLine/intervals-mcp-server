@@ -27,6 +27,109 @@ function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
 
+/** Compact default for activity records. The full object carries ~184 fields,
+ *  half of them null for any given sport, at ~4.8 KB per activity. */
+const ACTIVITY_SUMMARY_FIELDS = [
+  "id",
+  "name",
+  "type",
+  "start_date_local",
+  "race",
+  "description",
+  "tags",
+  "distance",
+  "moving_time",
+  "elapsed_time",
+  "total_elevation_gain",
+  "average_speed",
+  "max_speed",
+  "pace",
+  "gap",
+  "average_heartrate",
+  "max_heartrate",
+  "average_cadence",
+  "calories",
+  "icu_training_load",
+  "icu_atl",
+  "icu_ctl",
+  "icu_intensity",
+  "trimp",
+  "hr_load",
+  "pace_load",
+  "has_heartrate",
+  "device_watts",
+  "stream_types",
+  "interval_summary",
+];
+
+/** Compact default for calendar events. Chiefly excludes workout_doc, the
+ *  structured-workout blob that dominates an event's ~1.7 KB. */
+const EVENT_SUMMARY_FIELDS = [
+  "id",
+  "name",
+  "category",
+  "type",
+  "start_date_local",
+  "end_date_local",
+  "description",
+  "moving_time",
+  "distance",
+  "indoor",
+  "icu_training_load",
+  "icu_intensity",
+  "paired_activity_id",
+  "show_as_note",
+];
+
+/** Shared `fields` input. */
+const fieldsParam = (summary: string[], total: number) =>
+  z
+    .array(z.string())
+    .optional()
+    .describe(
+      `Fields to return. Defaults to a compact ${summary.length}-field summary; ` +
+        `the full record has ~${total} fields, many of them null. Pass ["*"] for everything.`
+    );
+
+/** Project each record down to `fields`, preserving the array/object shape of
+ *  the response. The API returns a fixed key set (with nulls for metrics that
+ *  do not apply), so a name matching no record is a typo rather than a missing
+ *  value - report it, with the valid names, instead of silently dropping it. */
+function project(data: unknown, fields: string[]): unknown {
+  if (fields.includes("*")) return data;
+
+  const records = Array.isArray(data) ? data : [data];
+  const known = new Set<string>();
+  for (const record of records) {
+    if (record && typeof record === "object") {
+      for (const k of Object.keys(record)) known.add(k);
+    }
+  }
+
+  // Nothing to validate against when the result set is empty.
+  if (known.size > 0) {
+    const unknown = fields.filter((f) => !known.has(f));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Unknown field(s): ${unknown.join(", ")}. ` +
+          `Valid fields are: ${[...known].sort().join(", ")}`
+      );
+    }
+  }
+
+  const pick = (record: unknown) => {
+    if (!record || typeof record !== "object") return record;
+    const src = record as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const f of fields) {
+      if (f in src) out[f] = src[f];
+    }
+    return out;
+  };
+
+  return Array.isArray(data) ? data.map(pick) : pick(data);
+}
+
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DATETIME_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?$/;
 
@@ -104,7 +207,8 @@ server.tool(
 
 server.tool(
   "list_activities",
-  "List activities for a date range. Returns summary data for each activity.",
+  "List activities for a date range. Returns a compact summary of each activity " +
+    "by default; use `fields` to choose exactly what you need.",
   {
     oldest: isoDate("Start date in YYYY-MM-DD format (inclusive)"),
     newest: isoDate("End date in YYYY-MM-DD format (inclusive)"),
@@ -115,23 +219,31 @@ server.tool(
       .max(500)
       .optional()
       .describe("Maximum number of activities to return"),
+    fields: fieldsParam(ACTIVITY_SUMMARY_FIELDS, 184),
   },
-  async ({ oldest, newest, limit }) => {
+  async ({ oldest, newest, limit, fields }) => {
     const params: Record<string, string> = { oldest, newest };
     if (limit !== undefined) params.limit = String(limit);
-    return json(
-      await client.get(`/athlete/${client.athleteId}/activities`, params)
+    const data = await client.get(
+      `/athlete/${client.athleteId}/activities`,
+      params
     );
+    return json(project(data, fields ?? ACTIVITY_SUMMARY_FIELDS));
   }
 );
 
 server.tool(
   "get_activity",
-  "Get detailed information about a specific activity by its ID.",
+  "Get detailed information about a specific activity by its ID. Returns a " +
+    "compact summary by default; pass `fields` for other metrics.",
   {
     activity_id: z.string().describe("The activity ID"),
+    fields: fieldsParam(ACTIVITY_SUMMARY_FIELDS, 184),
   },
-  async ({ activity_id }) => json(await client.get(`/activity/${activity_id}`))
+  async ({ activity_id, fields }) => {
+    const data = await client.get(`/activity/${activity_id}`);
+    return json(project(data, fields ?? ACTIVITY_SUMMARY_FIELDS));
+  }
 );
 
 server.tool(
@@ -328,25 +440,37 @@ server.tool(
 
 server.tool(
   "list_events",
-  "List events on the athlete's training calendar for a date range.",
+  "List events on the athlete's training calendar for a date range. Returns a " +
+    "compact summary of each event by default, omitting the structured-workout " +
+    "document; pass `fields` to change that.",
   {
     oldest: isoDate("Start date YYYY-MM-DD"),
     newest: isoDate("End date YYYY-MM-DD"),
+    fields: fieldsParam(EVENT_SUMMARY_FIELDS, 62),
   },
-  async ({ oldest, newest }) =>
-    json(
-      await client.get(`/athlete/${client.athleteId}/events`, { oldest, newest })
-    )
+  async ({ oldest, newest, fields }) => {
+    const data = await client.get(`/athlete/${client.athleteId}/events`, {
+      oldest,
+      newest,
+    });
+    return json(project(data, fields ?? EVENT_SUMMARY_FIELDS));
+  }
 );
 
 server.tool(
   "get_event",
-  "Get a specific calendar event by ID.",
+  "Get a specific calendar event by ID. Returns a compact summary by default - " +
+    'pass fields ["*"] (or name workout_doc) to get the structured workout.',
   {
     event_id: z.string().describe("The event ID"),
+    fields: fieldsParam(EVENT_SUMMARY_FIELDS, 62),
   },
-  async ({ event_id }) =>
-    json(await client.get(`/athlete/${client.athleteId}/events/${event_id}`))
+  async ({ event_id, fields }) => {
+    const data = await client.get(
+      `/athlete/${client.athleteId}/events/${event_id}`
+    );
+    return json(project(data, fields ?? EVENT_SUMMARY_FIELDS));
+  }
 );
 
 server.tool(
