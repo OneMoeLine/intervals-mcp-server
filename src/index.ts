@@ -19,26 +19,85 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Wrap a payload as a tool result. Deliberately not pretty-printed: the
+ *  indentation roughly doubles the token cost and nothing downstream reads it. */
+function json(data: unknown) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DATETIME_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?$/;
+
+/** Validate dates up front so a malformed value fails with an actionable
+ *  message instead of a confusing 422 from the API. */
+const isoDate = (description: string) =>
+  z
+    .string()
+    .regex(DATE_RE, "Must be a date in YYYY-MM-DD format")
+    .describe(description);
+
+const isoDateTime = (description: string) =>
+  z
+    .string()
+    .regex(DATETIME_RE, "Must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS")
+    .describe(description);
+
+/** A 1-10 subjective wellness score. */
+const score = (description: string) =>
+  z.number().min(1).max(10).optional().describe(description);
+
+/** Default samples per stream channel. A long ride is tens of thousands of
+ *  samples across ~8 channels, which would otherwise exhaust the caller's
+ *  context in a single tool call. */
+const DEFAULT_STREAM_POINTS = 500;
+
+/** Evenly spaced subsample that always keeps the first and last points. */
+function decimate<T>(values: T[], maxPoints: number): T[] {
+  if (values.length <= maxPoints) return values;
+  // Guard the single-point case: the step below would divide by zero.
+  if (maxPoints <= 1) return values.slice(0, 1);
+  const step = (values.length - 1) / (maxPoints - 1);
+  const out: T[] = [];
+  for (let i = 0; i < maxPoints; i++) {
+    out.push(values[Math.round(i * step)]);
+  }
+  return out;
+}
+
+/** Intervals.icu returns streams as [{ type, data: [...] }, ...]. Decimate each
+ *  channel and record that we did, so the caller knows the resolution it got. */
+function downsampleStreams(data: unknown, maxPoints: number): unknown {
+  if (!Array.isArray(data)) return data;
+  return data.map((stream) => {
+    if (stream === null || typeof stream !== "object") return stream;
+    const channel = stream as Record<string, unknown>;
+    if (!Array.isArray(channel.data)) return stream;
+    const original = channel.data.length;
+    if (original <= maxPoints) return stream;
+    return {
+      ...channel,
+      data: decimate(channel.data, maxPoints),
+      downsampled: { original_points: original, returned_points: maxPoints },
+    };
+  });
+}
+
 // ── Athlete ───────────────────────────────────────────────────────────────────
 
 server.tool(
   "get_athlete",
   "Get the athlete profile including sport settings, fitness metrics, and account info.",
   {},
-  async () => {
-    const data = await client.get(`/athlete/${client.athleteId}`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async () => json(await client.get(`/athlete/${client.athleteId}`))
 );
 
 server.tool(
   "get_athlete_profile",
   "Get public profile info for the athlete (name, bio, location, etc.).",
   {},
-  async () => {
-    const data = await client.get(`/athlete/${client.athleteId}/profile`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async () => json(await client.get(`/athlete/${client.athleteId}/profile`))
 );
 
 // ── Activities ────────────────────────────────────────────────────────────────
@@ -47,19 +106,22 @@ server.tool(
   "list_activities",
   "List activities for a date range. Returns summary data for each activity.",
   {
-    oldest: z
-      .string()
-      .describe("Start date in YYYY-MM-DD format (inclusive)"),
-    newest: z
-      .string()
-      .describe("End date in YYYY-MM-DD format (inclusive)"),
+    oldest: isoDate("Start date in YYYY-MM-DD format (inclusive)"),
+    newest: isoDate("End date in YYYY-MM-DD format (inclusive)"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(500)
+      .optional()
+      .describe("Maximum number of activities to return"),
   },
-  async ({ oldest, newest }) => {
-    const data = await client.get(`/athlete/${client.athleteId}/activities`, {
-      oldest,
-      newest,
-    });
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  async ({ oldest, newest, limit }) => {
+    const params: Record<string, string> = { oldest, newest };
+    if (limit !== undefined) params.limit = String(limit);
+    return json(
+      await client.get(`/athlete/${client.athleteId}/activities`, params)
+    );
   }
 );
 
@@ -69,10 +131,7 @@ server.tool(
   {
     activity_id: z.string().describe("The activity ID"),
   },
-  async ({ activity_id }) => {
-    const data = await client.get(`/activity/${activity_id}`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ activity_id }) => json(await client.get(`/activity/${activity_id}`))
 );
 
 server.tool(
@@ -80,19 +139,20 @@ server.tool(
   "Search for activities by name or tag.",
   {
     query: z.string().describe("Search query (name or tag)"),
-    max: z
+    limit: z
       .number()
+      .int()
+      .min(1)
+      .max(200)
       .optional()
       .describe("Maximum number of results (default 20)"),
   },
-  async ({ query, max }) => {
-    const params: Record<string, string> = { query };
-    if (max !== undefined) params.max = String(max);
-    const data = await client.get(
-      `/athlete/${client.athleteId}/activities/search`,
-      params
+  async ({ query, limit }) => {
+    const params: Record<string, string> = { q: query };
+    if (limit !== undefined) params.limit = String(limit);
+    return json(
+      await client.get(`/athlete/${client.athleteId}/activities/search`, params)
     );
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
 
@@ -102,21 +162,40 @@ server.tool(
   {
     activity_id: z.string().describe("The activity ID"),
   },
-  async ({ activity_id }) => {
-    const data = await client.get(`/activity/${activity_id}/intervals`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ activity_id }) =>
+    json(await client.get(`/activity/${activity_id}/intervals`))
 );
 
 server.tool(
   "get_activity_streams",
-  "Get time-series data streams for an activity (power, HR, cadence, speed, altitude, GPS, etc.).",
+  "Get time-series data streams for an activity (power, HR, cadence, speed, altitude, GPS, etc.). " +
+    "Streams are large, so each channel is downsampled to " +
+    `${DEFAULT_STREAM_POINTS} evenly spaced points by default. ` +
+    "Pass types to fetch only the channels you need, and raise max_points only when you " +
+    "genuinely need finer resolution.",
   {
     activity_id: z.string().describe("The activity ID"),
+    types: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Channels to return, e.g. ["watts","heartrate","cadence"]. Omit for all channels (much larger).'
+      ),
+    max_points: z
+      .number()
+      .int()
+      .min(1)
+      .max(10000)
+      .optional()
+      .describe(
+        `Downsample each channel to at most this many points (default ${DEFAULT_STREAM_POINTS})`
+      ),
   },
-  async ({ activity_id }) => {
-    const data = await client.get(`/activity/${activity_id}/streams`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  async ({ activity_id, types, max_points }) => {
+    const params: Record<string, string> = {};
+    if (types && types.length > 0) params.types = types.join(",");
+    const data = await client.get(`/activity/${activity_id}/streams`, params);
+    return json(downsampleStreams(data, max_points ?? DEFAULT_STREAM_POINTS));
   }
 );
 
@@ -126,10 +205,8 @@ server.tool(
   {
     activity_id: z.string().describe("The activity ID"),
   },
-  async ({ activity_id }) => {
-    const data = await client.get(`/activity/${activity_id}/power-curve`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ activity_id }) =>
+    json(await client.get(`/activity/${activity_id}/power-curve`))
 );
 
 server.tool(
@@ -138,10 +215,8 @@ server.tool(
   {
     activity_id: z.string().describe("The activity ID"),
   },
-  async ({ activity_id }) => {
-    const data = await client.get(`/activity/${activity_id}/best-efforts`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ activity_id }) =>
+    json(await client.get(`/activity/${activity_id}/best-efforts`))
 );
 
 server.tool(
@@ -150,10 +225,8 @@ server.tool(
   {
     activity_id: z.string().describe("The activity ID"),
   },
-  async ({ activity_id }) => {
-    const data = await client.get(`/activity/${activity_id}/weather-summary`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ activity_id }) =>
+    json(await client.get(`/activity/${activity_id}/weather-summary`))
 );
 
 // ── Power & Performance ───────────────────────────────────────────────────────
@@ -162,25 +235,21 @@ server.tool(
   "get_power_curves",
   "Get the athlete's best mean maximal power curves across all activities. Optionally filter by date range and sport type.",
   {
-    oldest: z.string().optional().describe("Start date YYYY-MM-DD"),
-    newest: z.string().optional().describe("End date YYYY-MM-DD"),
+    oldest: isoDate("Start date YYYY-MM-DD").optional(),
+    newest: isoDate("End date YYYY-MM-DD").optional(),
     type: z
       .string()
       .optional()
-      .describe(
-        "Sport type filter e.g. Ride, Run, Swim (leave blank for all)"
-      ),
+      .describe("Sport type filter e.g. Ride, Run, Swim (leave blank for all)"),
   },
   async ({ oldest, newest, type }) => {
     const params: Record<string, string> = {};
     if (oldest) params.oldest = oldest;
     if (newest) params.newest = newest;
     if (type) params.type = type;
-    const data = await client.get(
-      `/athlete/${client.athleteId}/power-curves`,
-      params
+    return json(
+      await client.get(`/athlete/${client.athleteId}/power-curves`, params)
     );
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
 
@@ -190,50 +259,58 @@ server.tool(
   "list_wellness",
   "List wellness records for a date range. Includes HRV, resting HR, sleep, weight, mood, etc.",
   {
-    oldest: z.string().describe("Start date YYYY-MM-DD"),
-    newest: z.string().describe("End date YYYY-MM-DD"),
+    oldest: isoDate("Start date YYYY-MM-DD"),
+    newest: isoDate("End date YYYY-MM-DD"),
   },
-  async ({ oldest, newest }) => {
-    const data = await client.get(`/athlete/${client.athleteId}/wellness`, {
-      oldest,
-      newest,
-    });
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ oldest, newest }) =>
+    json(
+      await client.get(`/athlete/${client.athleteId}/wellness`, {
+        oldest,
+        newest,
+      })
+    )
 );
 
 server.tool(
   "get_wellness",
   "Get the wellness record for a specific date.",
   {
-    date: z.string().describe("Date in YYYY-MM-DD format"),
+    date: isoDate("Date in YYYY-MM-DD format"),
   },
-  async ({ date }) => {
-    const data = await client.get(
-      `/athlete/${client.athleteId}/wellness/${date}`
-    );
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ date }) =>
+    json(await client.get(`/athlete/${client.athleteId}/wellness/${date}`))
 );
 
 server.tool(
   "update_wellness",
   "Update the wellness record for a specific date. Only supply the fields you want to change.",
   {
-    date: z.string().describe("Date in YYYY-MM-DD format"),
-    weight: z.number().optional().describe("Body weight in kg"),
-    restingHR: z.number().optional().describe("Resting heart rate (bpm)"),
-    hrv: z.number().optional().describe("HRV score"),
-    hrvSDNN: z.number().optional().describe("HRV SDNN (ms)"),
-    sleepSecs: z.number().optional().describe("Sleep duration in seconds"),
+    date: isoDate("Date in YYYY-MM-DD format"),
+    weight: z.number().positive().optional().describe("Body weight in kg"),
+    restingHR: z
+      .number()
+      .positive()
+      .optional()
+      .describe("Resting heart rate (bpm)"),
+    hrv: z.number().positive().optional().describe("HRV score"),
+    hrvSDNN: z.number().positive().optional().describe("HRV SDNN (ms)"),
+    sleepSecs: z
+      .number()
+      .nonnegative()
+      .optional()
+      .describe("Sleep duration in seconds"),
     sleepScore: z.number().optional().describe("Sleep quality score"),
     sleepTq: z.number().optional().describe("Sleep time in bed quality"),
-    mood: z.number().optional().describe("Mood score (1-10)"),
-    fatigue: z.number().optional().describe("Fatigue score (1-10)"),
-    stress: z.number().optional().describe("Stress score (1-10)"),
-    soreness: z.number().optional().describe("Soreness score (1-10)"),
-    injury: z.number().optional().describe("Injury score (1-10)"),
-    kcalConsumed: z.number().optional().describe("Calories consumed"),
+    mood: score("Mood score (1-10)"),
+    fatigue: score("Fatigue score (1-10)"),
+    stress: score("Stress score (1-10)"),
+    soreness: score("Soreness score (1-10)"),
+    injury: score("Injury score (1-10)"),
+    kcalConsumed: z
+      .number()
+      .nonnegative()
+      .optional()
+      .describe("Calories consumed"),
     notes: z.string().optional().describe("Free text notes"),
   },
   async ({ date, ...fields }) => {
@@ -241,11 +318,9 @@ server.tool(
     const body = Object.fromEntries(
       Object.entries(fields).filter(([, v]) => v !== undefined)
     );
-    const data = await client.put(
-      `/athlete/${client.athleteId}/wellness/${date}`,
-      body
+    return json(
+      await client.put(`/athlete/${client.athleteId}/wellness/${date}`, body)
     );
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
 
@@ -255,16 +330,13 @@ server.tool(
   "list_events",
   "List events on the athlete's training calendar for a date range.",
   {
-    oldest: z.string().describe("Start date YYYY-MM-DD"),
-    newest: z.string().describe("End date YYYY-MM-DD"),
+    oldest: isoDate("Start date YYYY-MM-DD"),
+    newest: isoDate("End date YYYY-MM-DD"),
   },
-  async ({ oldest, newest }) => {
-    const data = await client.get(`/athlete/${client.athleteId}/events`, {
-      oldest,
-      newest,
-    });
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ oldest, newest }) =>
+    json(
+      await client.get(`/athlete/${client.athleteId}/events`, { oldest, newest })
+    )
 );
 
 server.tool(
@@ -273,21 +345,17 @@ server.tool(
   {
     event_id: z.string().describe("The event ID"),
   },
-  async ({ event_id }) => {
-    const data = await client.get(
-      `/athlete/${client.athleteId}/events/${event_id}`
-    );
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ event_id }) =>
+    json(await client.get(`/athlete/${client.athleteId}/events/${event_id}`))
 );
 
 server.tool(
   "create_event",
   "Create an event on the athlete's training calendar (planned workout, race, note, etc.).",
   {
-    start_date_local: z
-      .string()
-      .describe("Start date/time in ISO 8601 format e.g. 2024-06-01T08:00:00"),
+    start_date_local: isoDateTime(
+      "Start date/time in ISO 8601 format e.g. 2024-06-01T08:00:00"
+    ),
     category: z
       .enum([
         "WORKOUT",
@@ -308,9 +376,14 @@ server.tool(
       .describe("Sport type e.g. Ride, Run, Swim, WeightTraining"),
     moving_time: z
       .number()
+      .positive()
       .optional()
       .describe("Planned duration in seconds"),
-    distance: z.number().optional().describe("Planned distance in meters"),
+    distance: z
+      .number()
+      .positive()
+      .optional()
+      .describe("Planned distance in meters"),
   },
   async ({
     start_date_local,
@@ -328,11 +401,7 @@ server.tool(
     if (moving_time !== undefined) body.moving_time = moving_time;
     if (distance !== undefined) body.distance = distance;
 
-    const data = await client.post(
-      `/athlete/${client.athleteId}/events`,
-      body
-    );
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return json(await client.post(`/athlete/${client.athleteId}/events`, body));
   }
 );
 
@@ -342,10 +411,7 @@ server.tool(
   "list_workouts",
   "List all workouts in the athlete's workout library.",
   {},
-  async () => {
-    const data = await client.get(`/athlete/${client.athleteId}/workouts`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async () => json(await client.get(`/athlete/${client.athleteId}/workouts`))
 );
 
 server.tool(
@@ -354,12 +420,8 @@ server.tool(
   {
     workout_id: z.string().describe("The workout ID"),
   },
-  async ({ workout_id }) => {
-    const data = await client.get(
-      `/athlete/${client.athleteId}/workouts/${workout_id}`
-    );
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ workout_id }) =>
+    json(await client.get(`/athlete/${client.athleteId}/workouts/${workout_id}`))
 );
 
 // ── Gear ─────────────────────────────────────────────────────────────────────
@@ -368,10 +430,7 @@ server.tool(
   "list_gear",
   "List all gear (bikes, shoes, etc.) for the athlete.",
   {},
-  async () => {
-    const data = await client.get(`/athlete/${client.athleteId}/gear`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async () => json(await client.get(`/athlete/${client.athleteId}/gear`))
 );
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -380,10 +439,7 @@ server.tool(
   "list_routes",
   "List saved routes for the athlete.",
   {},
-  async () => {
-    const data = await client.get(`/athlete/${client.athleteId}/routes`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async () => json(await client.get(`/athlete/${client.athleteId}/routes`))
 );
 
 server.tool(
@@ -392,17 +448,19 @@ server.tool(
   {
     route_id: z.string().describe("The route ID"),
   },
-  async ({ route_id }) => {
-    const data = await client.get(
-      `/athlete/${client.athleteId}/routes/${route_id}`
-    );
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-  }
+  async ({ route_id }) =>
+    json(await client.get(`/athlete/${client.athleteId}/routes/${route_id}`))
 );
 
 // ── Start server ──────────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport();
-server.connect(transport).then(() => {
-  console.error("Intervals.icu MCP server running on stdio");
-});
+server
+  .connect(transport)
+  .then(() => {
+    console.error("Intervals.icu MCP server running on stdio");
+  })
+  .catch((err) => {
+    console.error("Failed to start Intervals.icu MCP server:", err);
+    process.exit(1);
+  });
