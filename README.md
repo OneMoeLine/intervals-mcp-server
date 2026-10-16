@@ -22,6 +22,7 @@ either is missing:
 | --- | --- |
 | `INTERVALS_API_KEY` | Your Intervals.icu API key |
 | `INTERVALS_ATHLETE_ID` | Your athlete ID, e.g. `i12345` |
+| `INTERVALS_BASE_URL` | *Optional.* API root, for pointing the client at a local fake server. Defaults to `https://intervals.icu/api/v1`; the test suite is the only thing that normally sets it. |
 
 > **Note:** there is no `dotenv` dependency, so a `.env` file is **not** loaded
 > automatically. `.env.example` is a reference for the values you need — supply
@@ -64,6 +65,34 @@ For development without a build step:
 ```bash
 npm run dev
 ```
+
+## Tests
+
+```bash
+npm test
+```
+
+85 [vitest](https://vitest.dev) tests, about 1.5 seconds. **No credentials and
+no network access are needed** — nothing in the suite contacts Intervals.icu.
+`npm test` builds first (via `pretest`), because the protocol tests spawn the
+compiled `dist/index.js`. `npm run test:watch` reruns on change, and
+`npm run typecheck` checks `src` and `test` together.
+
+Three layers:
+
+- **`test/transform.test.ts`** — the pure helpers, no I/O: `decimate` (including
+  the `max_points: 1` case that once divided by zero), `downsampleStreams`,
+  `project`/`projectNested` and the date schemas.
+- **`test/api.test.ts`** — `IntervalsClient` against a throwaway `node:http`
+  server on an ephemeral loopback port: auth header, query building, JSON vs
+  text parsing, which statuses retry and which do not, the `Retry-After`
+  schedule and its cap, per-attempt timeouts and error-body truncation. The
+  backoff is injected as zero, so the retry tests do not sleep.
+- **`test/mcp.test.ts`** — the real server binary over stdio: `initialize`, then
+  `tools/list` asserting all 22 tools and their input schemas, plus `tools/call`
+  for the handler rules (the either/or on `get_activity_best_efforts`, date
+  rejection before any HTTP call) and a handful of end-to-end calls against the
+  fake API.
 
 ## Tools
 
@@ -148,9 +177,14 @@ pretty-printed output roughly doubles token cost for no benefit.
 - Tools use the SDK's deprecated `server.tool()` API rather than `registerTool`,
   so they carry no `readOnlyHint`/`destructiveHint` annotations and no
   `outputSchema`.
-- No automated tests. Every verification so far has been a throwaway script;
-  `BASE_URL` is hardcoded in `src/api.ts`, so there is no seam for pointing the
-  client at a fake server.
+- The test suite never contacts Intervals.icu, so it pins down this server's
+  behaviour rather than the upstream API's. A change in what Intervals.icu
+  actually returns would not be caught by it.
+- Of the 22 tools, five are driven end to end against the fake API
+  (`list_activities`, `get_activity_streams`, `get_power_curves`,
+  `update_wellness`, `create_event`) and three more are exercised on their
+  error paths. The remaining fourteen are covered only at the schema level, by
+  `tools/list`.
 - `list_workouts`, `list_gear` and `list_routes` return zero records for the
   configured athlete, so they have never been exercised against real data and
   are unverified.

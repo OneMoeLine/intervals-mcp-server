@@ -1,15 +1,17 @@
-const BASE_URL = "https://intervals.icu/api/v1";
+/** Default Intervals.icu API root. Overridable per-client so tests can point
+ *  at a local fake server. */
+export const DEFAULT_BASE_URL = "https://intervals.icu/api/v1";
 
 /** Abort a single HTTP attempt after this long, so a hung connection cannot
  *  hang a tool call indefinitely. */
-const REQUEST_TIMEOUT_MS = 30_000;
+export const REQUEST_TIMEOUT_MS = 30_000;
 
 /** Retries *after* the initial attempt. */
-const MAX_RETRIES = 3;
+export const MAX_RETRIES = 3;
 
 /** Upper bound on an upstream error body echoed back to the caller, so an
  *  HTML error page is not dumped verbatim into a tool result. */
-const MAX_ERROR_BODY = 500;
+export const MAX_ERROR_BODY = 500;
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
@@ -23,7 +25,7 @@ function truncate(text: string, limit = MAX_ERROR_BODY): string {
 }
 
 /** Honour Retry-After when the server sends it, else exponential backoff. */
-function retryDelayMs(res: Response | undefined, attempt: number): number {
+export function retryDelayMs(res: Response | undefined, attempt: number): number {
   const header = res?.headers.get("retry-after");
   if (header) {
     const seconds = Number(header);
@@ -34,14 +36,35 @@ function retryDelayMs(res: Response | undefined, attempt: number): number {
   return Math.min(500 * 2 ** attempt, 4_000);
 }
 
+export interface IntervalsClientOptions {
+  /** API root. Defaults to `INTERVALS_BASE_URL` if set, else the live
+   *  Intervals.icu API. */
+  baseUrl?: string;
+  /** Per-attempt abort timeout. */
+  timeoutMs?: number;
+  /** Backoff schedule. Injectable so tests need not sit through real sleeps. */
+  retryDelay?: (res: Response | undefined, attempt: number) => number;
+}
+
 export class IntervalsClient {
   private authHeader: string;
+  private baseUrl: string;
+  private timeoutMs: number;
+  private retryDelay: (res: Response | undefined, attempt: number) => number;
   public athleteId: string;
 
-  constructor(apiKey: string, athleteId: string) {
+  constructor(
+    apiKey: string,
+    athleteId: string,
+    options: IntervalsClientOptions = {}
+  ) {
     this.authHeader =
       "Basic " + Buffer.from(`API_KEY:${apiKey}`).toString("base64");
     this.athleteId = athleteId;
+    this.baseUrl =
+      options.baseUrl ?? process.env.INTERVALS_BASE_URL ?? DEFAULT_BASE_URL;
+    this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.retryDelay = options.retryDelay ?? retryDelayMs;
   }
 
   async request<T>(
@@ -50,7 +73,7 @@ export class IntervalsClient {
     params?: Record<string, string>,
     body?: unknown
   ): Promise<T> {
-    const url = new URL(`${BASE_URL}${path}`);
+    const url = new URL(`${this.baseUrl}${path}`);
     if (params) {
       for (const [k, v] of Object.entries(params)) {
         url.searchParams.set(k, v);
@@ -70,17 +93,17 @@ export class IntervalsClient {
             Accept: "application/json",
           },
           body: body !== undefined ? JSON.stringify(body) : undefined,
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: AbortSignal.timeout(this.timeoutMs),
         });
       } catch (err) {
         // Timeouts and transport failures are both worth another attempt.
         const name = err instanceof Error ? err.name : "";
         lastError =
           name === "TimeoutError" || name === "AbortError"
-            ? `request timed out after ${REQUEST_TIMEOUT_MS}ms`
+            ? `request timed out after ${this.timeoutMs}ms`
             : `network error: ${err instanceof Error ? err.message : String(err)}`;
         if (attempt === MAX_RETRIES) break;
-        await sleep(retryDelayMs(undefined, attempt));
+        await sleep(this.retryDelay(undefined, attempt));
         continue;
       }
 
@@ -97,7 +120,7 @@ export class IntervalsClient {
       if (!RETRYABLE_STATUS.has(res.status) || attempt === MAX_RETRIES) {
         throw new Error(`Intervals.icu API error ${lastError}`);
       }
-      await sleep(retryDelayMs(res, attempt));
+      await sleep(this.retryDelay(res, attempt));
     }
 
     throw new Error(
