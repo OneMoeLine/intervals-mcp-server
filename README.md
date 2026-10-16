@@ -93,18 +93,21 @@ reduced, the response includes a `downsampled` field reporting the original and
 returned point counts. Pass `types` to fetch only the channels you need
 (e.g. `["watts","heartrate"]`) and `max_points` to change the resolution.
 
-**Activity and event records are trimmed.** The API returns a fixed, very wide
-record — 184 fields per activity and 62 per calendar event, with roughly half
-null for any given sport. `list_activities`, `get_activity`, `list_events` and
-`get_event` therefore return a compact summary by default (30 fields for
-activities, 14 for events, omitting the `workout_doc` workout structure).
-Measured against real data:
+**Records are trimmed.** The API returns fixed, very wide records — 184 fields
+per activity, 84 per interval lap, 162 on the athlete, 62 per calendar event,
+47 per wellness day — with much of it null or irrelevant for any given sport.
+Eight tools therefore return a compact summary by default and accept a `fields`
+parameter. Measured against real data:
 
 | Call | Default | Full | Saving |
 | --- | --- | --- | --- |
+| `get_athlete` | 0.4 KB | 14.9 KB | 97% |
+| `list_events`, 43 events | 14.9 KB | 91.9 KB | 84% |
 | `list_activities`, 14 activities | 10.9 KB | 63.8 KB | 83% |
 | `get_activity`, one activity | 0.9 KB | 4.8 KB | 82% |
-| `list_events`, 43 events | 14.9 KB | 91.9 KB | 84% |
+| `get_activity_intervals`, 12 laps | 7.4 KB | 29.0 KB | 74% |
+| `get_power_curves`, type=Ride | 5.4 KB | 17.9 KB | 70% |
+| `list_wellness`, 15 days | 5.4 KB | 12.9 KB | 58% |
 
 Pass `fields` to choose exactly what you want — `fields: ["id","name",
 "icu_training_load"]` returns those three and nothing else — or
@@ -112,6 +115,15 @@ Pass `fields` to choose exactly what you want — `fields: ["id","name",
 (inapplicable metrics come back null rather than absent), a field name that
 matches no record is treated as a typo: the call fails and lists the valid
 field names so the mistake can be corrected in one step.
+
+Three cases are worth knowing. On `get_activity_intervals` the bulk is the
+nested per-lap list, so `fields` applies to the laps inside `icu_intervals` and
+`icu_groups` rather than to the wrapper. On `get_athlete`, `sportSettings`
+holds per-sport FTP, thresholds and zones and is 10.2 KB on its own — ask for
+it explicitly with `fields: ["sportSettings"]`. On `get_power_curves` the
+`activities` lookup map is roughly as large as the curves themselves and is
+omitted unless you pass `["*"]`; `secs` and `values` on each curve are the
+curve.
 
 **Dates are validated locally.** Date inputs must be `YYYY-MM-DD`
 (`create_event` also accepts `YYYY-MM-DDTHH:MM:SS`). Malformed values fail
@@ -136,4 +148,11 @@ pretty-printed output roughly doubles token cost for no benefit.
 - Tools use the SDK's deprecated `server.tool()` API rather than `registerTool`,
   so they carry no `readOnlyHint`/`destructiveHint` annotations and no
   `outputSchema`.
-- No automated tests.
+- No automated tests. Every verification so far has been a throwaway script;
+  `BASE_URL` is hardcoded in `src/api.ts`, so there is no seam for pointing the
+  client at a fake server.
+- `list_workouts`, `list_gear` and `list_routes` return zero records for the
+  configured athlete, so they have never been exercised against real data and
+  are unverified.
+- `get_power_curves` takes exactly one sport `type`; the API rejects a
+  comma-separated list, so there is no all-sports view.

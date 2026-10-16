@@ -91,43 +91,176 @@ const fieldsParam = (summary: string[], total: number) =>
         `the full record has ~${total} fields, many of them null. Pass ["*"] for everything.`
     );
 
-/** Project each record down to `fields`, preserving the array/object shape of
- *  the response. The API returns a fixed key set (with nulls for metrics that
- *  do not apply), so a name matching no record is a typo rather than a missing
- *  value - report it, with the valid names, instead of silently dropping it. */
-function project(data: unknown, fields: string[]): unknown {
-  if (fields.includes("*")) return data;
+/** Per-lap records inside an activity's interval breakdown carry 84 fields. */
+const INTERVAL_SUMMARY_FIELDS = [
+  "id",
+  "type",
+  "label",
+  "group_id",
+  "start_time",
+  "end_time",
+  "moving_time",
+  "elapsed_time",
+  "distance",
+  "zone",
+  "intensity",
+  "average_watts",
+  "weighted_average_watts",
+  "max_watts",
+  "training_load",
+  "average_heartrate",
+  "max_heartrate",
+  "average_cadence",
+  "average_speed",
+  "gap",
+  "total_elevation_gain",
+  "average_gradient",
+  "decoupling",
+  "average_stride",
+];
 
-  const records = Array.isArray(data) ? data : [data];
+/** The athlete record is 162 fields, ~15 KB, of which `sportSettings` alone is
+ *  ~10 KB and most of the rest is per-vendor sync configuration. */
+const ATHLETE_SUMMARY_FIELDS = [
+  "id",
+  "name",
+  "firstname",
+  "lastname",
+  "sex",
+  "city",
+  "state",
+  "country",
+  "timezone",
+  "locale",
+  "measurement_preference",
+  "weight",
+  "icu_weight",
+  "icu_resting_hr",
+  "icu_date_of_birth",
+  "height",
+  "bio",
+  "plan",
+  "icu_coach",
+  "icu_tags",
+  "training_plan_id",
+  "training_availability",
+];
+
+/** Wellness records are 47 fields; this keeps the fitness model, the measured
+ *  vitals and the subjective scores that `update_wellness` can write. */
+const WELLNESS_SUMMARY_FIELDS = [
+  "id",
+  "ctl",
+  "atl",
+  "rampRate",
+  "weight",
+  "restingHR",
+  "hrv",
+  "hrvSDNN",
+  "avgSleepingHR",
+  "sleepSecs",
+  "sleepScore",
+  "sleepQuality",
+  "soreness",
+  "fatigue",
+  "stress",
+  "mood",
+  "motivation",
+  "injury",
+  "kcalConsumed",
+  "steps",
+  "vo2max",
+  "readiness",
+  "comments",
+];
+
+/** Curve records carry rank tables, power models and a map plot alongside the
+ *  curve itself; `secs` and `values` are the curve. */
+const POWER_CURVE_SUMMARY_FIELDS = [
+  "id",
+  "label",
+  "start_date_local",
+  "end_date_local",
+  "days",
+  "secs",
+  "values",
+  "watts_per_kg",
+  "moving_time",
+  "training_load",
+  "weight",
+  "activity_id",
+  "vo2max_5m",
+];
+
+/** Keys present across a set of records. The API returns a fixed key set, with
+ *  nulls for metrics that do not apply, so this is the authoritative list. */
+function knownKeys(records: unknown[]): Set<string> {
   const known = new Set<string>();
   for (const record of records) {
     if (record && typeof record === "object") {
       for (const k of Object.keys(record)) known.add(k);
     }
   }
+  return known;
+}
 
-  // Nothing to validate against when the result set is empty.
-  if (known.size > 0) {
-    const unknown = fields.filter((f) => !known.has(f));
-    if (unknown.length > 0) {
-      throw new Error(
-        `Unknown field(s): ${unknown.join(", ")}. ` +
-          `Valid fields are: ${[...known].sort().join(", ")}`
-      );
-    }
+/** A name matching no record is a typo rather than a missing value, so report
+ *  it with the valid names instead of silently dropping it. */
+function assertKnownFields(fields: string[], known: Set<string>): void {
+  if (known.size === 0) return; // empty result set: nothing to validate against
+  const unknown = fields.filter((f) => !known.has(f));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown field(s): ${unknown.join(", ")}. ` +
+        `Valid fields are: ${[...known].sort().join(", ")}`
+    );
   }
+}
 
-  const pick = (record: unknown) => {
-    if (!record || typeof record !== "object") return record;
-    const src = record as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const f of fields) {
-      if (f in src) out[f] = src[f];
-    }
-    return out;
-  };
+function pickFields(record: unknown, fields: string[]): unknown {
+  if (!record || typeof record !== "object") return record;
+  const src = record as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const f of fields) {
+    if (f in src) out[f] = src[f];
+  }
+  return out;
+}
 
-  return Array.isArray(data) ? data.map(pick) : pick(data);
+/** Project each record down to `fields`, preserving the array/object shape. */
+function project(data: unknown, fields: string[]): unknown {
+  if (fields.includes("*")) return data;
+  const records = Array.isArray(data) ? data : [data];
+  assertKnownFields(fields, knownKeys(records));
+  return Array.isArray(data)
+    ? data.map((r) => pickFields(r, fields))
+    : pickFields(data, fields);
+}
+
+/** Project the records inside named array fields, leaving the wrapper intact.
+ *  Used where the bulk of a response is a nested list rather than the top-level
+ *  object, as with an activity's interval breakdown. Field names are validated
+ *  against the union of all targeted arrays so a name valid in one of them is
+ *  not rejected because of another. */
+function projectNested(
+  data: unknown,
+  keys: string[],
+  fields: string[]
+): unknown {
+  if (fields.includes("*")) return data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+  const src = data as Record<string, unknown>;
+  const targets = keys.filter((k) => Array.isArray(src[k]));
+  if (targets.length === 0) return data;
+
+  const all = targets.flatMap((k) => src[k] as unknown[]);
+  assertKnownFields(fields, knownKeys(all));
+
+  const out: Record<string, unknown> = { ...src };
+  for (const k of targets) {
+    out[k] = (src[k] as unknown[]).map((r) => pickFields(r, fields));
+  }
+  return out;
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -191,9 +324,17 @@ function downsampleStreams(data: unknown, maxPoints: number): unknown {
 
 server.tool(
   "get_athlete",
-  "Get the athlete profile including sport settings, fitness metrics, and account info.",
-  {},
-  async () => json(await client.get(`/athlete/${client.athleteId}`))
+  "Get the athlete profile: identity, physiology and account info. Returns a " +
+    'compact subset by default - pass fields ["sportSettings"] for per-sport ' +
+    'FTP, thresholds and zones (~10 KB), or ["*"] for everything including ' +
+    "per-vendor sync configuration.",
+  {
+    fields: fieldsParam(ATHLETE_SUMMARY_FIELDS, 162),
+  },
+  async ({ fields }) => {
+    const data = await client.get(`/athlete/${client.athleteId}`);
+    return json(project(data, fields ?? ATHLETE_SUMMARY_FIELDS));
+  }
 );
 
 server.tool(
@@ -270,12 +411,23 @@ server.tool(
 
 server.tool(
   "get_activity_intervals",
-  "Get the lap/interval breakdown for an activity.",
+  "Get the lap/interval breakdown for an activity. Each lap carries 84 fields, " +
+    "so a compact subset is returned by default; `fields` applies to the " +
+    "individual laps inside `icu_intervals` and `icu_groups`.",
   {
     activity_id: z.string().describe("The activity ID"),
+    fields: fieldsParam(INTERVAL_SUMMARY_FIELDS, 84),
   },
-  async ({ activity_id }) =>
-    json(await client.get(`/activity/${activity_id}/intervals`))
+  async ({ activity_id, fields }) => {
+    const data = await client.get(`/activity/${activity_id}/intervals`);
+    return json(
+      projectNested(
+        data,
+        ["icu_intervals", "icu_groups"],
+        fields ?? INTERVAL_SUMMARY_FIELDS
+      )
+    );
+  }
 );
 
 server.tool(
@@ -323,12 +475,44 @@ server.tool(
 
 server.tool(
   "get_activity_best_efforts",
-  "Find best efforts (e.g. fastest 1km, peak 20-min power) within an activity.",
+  "Find best efforts within an activity - e.g. peak 5-min power, fastest 1km. " +
+    "Requires a stream to measure and exactly one of duration or distance.",
   {
     activity_id: z.string().describe("The activity ID"),
+    stream: z
+      .string()
+      .describe(
+        "Stream to measure, which must exist on the activity - see its " +
+          '`stream_types`. e.g. watts, heartrate, velocity_smooth, distance. ' +
+          'Note "pace" is NOT valid; use velocity_smooth.'
+      ),
+    duration: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("Effort length in seconds, e.g. 300 for peak 5-minute"),
+    distance: z
+      .number()
+      .positive()
+      .optional()
+      .describe("Effort length in meters, e.g. 1000 for fastest 1km"),
   },
-  async ({ activity_id }) =>
-    json(await client.get(`/activity/${activity_id}/best-efforts`))
+  async ({ activity_id, stream, duration, distance }) => {
+    // The raw-shape registration API takes no object-level zod refinement, so
+    // the either/or rule is enforced here rather than in the schema.
+    if ((duration === undefined) === (distance === undefined)) {
+      throw new Error(
+        "Provide exactly one of duration (seconds) or distance (meters)."
+      );
+    }
+    const params: Record<string, string> = { stream };
+    if (duration !== undefined) params.duration = String(duration);
+    if (distance !== undefined) params.distance = String(distance);
+    return json(
+      await client.get(`/activity/${activity_id}/best-efforts`, params)
+    );
+  }
 );
 
 server.tool(
@@ -345,23 +529,49 @@ server.tool(
 
 server.tool(
   "get_power_curves",
-  "Get the athlete's best mean maximal power curves across all activities. Optionally filter by date range and sport type.",
+  "Get the athlete's best mean maximal power curves across activities of one " +
+    "sport. `secs` and `values` on each curve are the curve itself. The bulk " +
+    "`activities` lookup map is omitted unless you pass fields [\"*\"].",
   {
-    oldest: isoDate("Start date YYYY-MM-DD").optional(),
-    newest: isoDate("End date YYYY-MM-DD").optional(),
     type: z
       .string()
+      .describe(
+        "Sport type - REQUIRED, and exactly one (the API rejects a comma-separated " +
+          "list). e.g. Ride, VirtualRide, GravelRide, Run, VirtualRun, Swim"
+      ),
+    oldest: isoDate("Start date YYYY-MM-DD").optional(),
+    newest: isoDate("End date YYYY-MM-DD").optional(),
+    curves: z
+      .string()
       .optional()
-      .describe("Sport type filter e.g. Ride, Run, Swim (leave blank for all)"),
+      .describe(
+        'Which curves to return, e.g. "42d" or "all". Invalid values are ' +
+          "rejected by the API with the list of valid ones."
+      ),
+    fields: fieldsParam(POWER_CURVE_SUMMARY_FIELDS, 20),
   },
-  async ({ oldest, newest, type }) => {
-    const params: Record<string, string> = {};
+  async ({ type, oldest, newest, curves, fields }) => {
+    const params: Record<string, string> = { type };
     if (oldest) params.oldest = oldest;
     if (newest) params.newest = newest;
-    if (type) params.type = type;
-    return json(
-      await client.get(`/athlete/${client.athleteId}/power-curves`, params)
+    if (curves) params.curves = curves;
+    const data = await client.get(
+      `/athlete/${client.athleteId}/power-curves`,
+      params
     );
+    if (fields?.includes("*")) return json(data);
+
+    const trimmed = projectNested(
+      data,
+      ["list"],
+      fields ?? POWER_CURVE_SUMMARY_FIELDS
+    );
+    // `activities` is a lookup map roughly as large as the curves themselves.
+    if (trimmed && typeof trimmed === "object" && !Array.isArray(trimmed)) {
+      const { activities, ...rest } = trimmed as Record<string, unknown>;
+      return json(rest);
+    }
+    return json(trimmed);
   }
 );
 
@@ -369,18 +579,20 @@ server.tool(
 
 server.tool(
   "list_wellness",
-  "List wellness records for a date range. Includes HRV, resting HR, sleep, weight, mood, etc.",
+  "List wellness records for a date range: fitness model (CTL/ATL), HRV, " +
+    "resting HR, sleep, weight, mood and the other subjective scores.",
   {
     oldest: isoDate("Start date YYYY-MM-DD"),
     newest: isoDate("End date YYYY-MM-DD"),
+    fields: fieldsParam(WELLNESS_SUMMARY_FIELDS, 47),
   },
-  async ({ oldest, newest }) =>
-    json(
-      await client.get(`/athlete/${client.athleteId}/wellness`, {
-        oldest,
-        newest,
-      })
-    )
+  async ({ oldest, newest, fields }) => {
+    const data = await client.get(`/athlete/${client.athleteId}/wellness`, {
+      oldest,
+      newest,
+    });
+    return json(project(data, fields ?? WELLNESS_SUMMARY_FIELDS));
+  }
 );
 
 server.tool(
