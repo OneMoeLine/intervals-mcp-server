@@ -322,3 +322,139 @@ export function downsampleStreams(data: unknown, maxPoints: number): unknown {
     };
   });
 }
+
+/** Drop keys whose value is undefined, so a partial update sends only what the
+ *  caller actually supplied. An explicit null is kept: it is how the API is
+ *  told to clear a field, which is different from leaving it alone. */
+export function compactBody(
+  fields: Record<string, unknown>
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, v]) => v !== undefined)
+  );
+}
+
+/** Calendar event categories, exactly as the API enumerates them. It validates
+ *  this strictly and rejects anything else, so near-misses - "RACE" for
+ *  RACE_A, "TRAVEL", "STRENGTH" - fail the call rather than degrading. */
+export const EVENT_CATEGORIES = [
+  "WORKOUT",
+  "RACE_A",
+  "RACE_B",
+  "RACE_C",
+  "NOTE",
+  "PLAN",
+  "HOLIDAY",
+  "SICK",
+  "INJURED",
+  "TARGET",
+  "SET_EFTP",
+  "SET_FITNESS",
+  "FITNESS_DAYS",
+  "SEASON_START",
+] as const;
+
+/** What each category is for. Inlined into the two event-writing tools because
+ *  picking the wrong one is the most likely way for a calendar write to go
+ *  wrong, and a bare enum does not say which race letter means what. */
+export const EVENT_CATEGORY_HELP =
+  "WORKOUT = planned session (put workout syntax in `description`); " +
+  "RACE_A/RACE_B/RACE_C = races by priority, A highest; " +
+  "NOTE = calendar note; PLAN = training-plan phase block (needs end_date_local); " +
+  "HOLIDAY/SICK/INJURED = time off, usually a date range; " +
+  "TARGET = performance goal; SET_EFTP/SET_FITNESS/FITNESS_DAYS/SEASON_START = " +
+  "fitness-chart adjustments on a date.";
+
+/** The wellness fields the fitness chart is built from. CTL and ATL are the
+ *  fitness model; the load pair is what fed them that day. */
+export const FITNESS_FIELDS = [
+  "id",
+  "ctl",
+  "atl",
+  "rampRate",
+  "ctlLoad",
+  "atlLoad",
+];
+
+export interface FitnessPoint {
+  date: string;
+  ctl?: number;
+  atl?: number;
+  form?: number;
+  ramp_rate?: number;
+  ctl_load?: number;
+  atl_load?: number;
+  /** Set only on days after `today`, where CTL/ATL come from planned events
+   *  rather than completed ones. Absent means measured. */
+  projected?: true;
+}
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+const num = (v: unknown): number | undefined =>
+  typeof v === "number" && Number.isFinite(v) ? v : undefined;
+
+/** Shape wellness records into a performance-management chart: CTL (fitness),
+ *  ATL (fatigue) and form, one point per day, ascending.
+ *
+ *  Form is CTL - ATL, computed here because the wellness record does not carry
+ *  it. Days with no fitness data at all are dropped rather than zero-filled -
+ *  a gap in the chart is missing data, and a zero would read as lost fitness.
+ *  Future dates are returned when the athlete has planned events and has
+ *  "include planned workouts in fitness" enabled upstream; they are flagged
+ *  `projected` so a caller cannot mistake a plan for a measurement. */
+export function fitnessSeries(
+  data: unknown,
+  today: string
+): { count: number; series: FitnessPoint[]; summary: Record<string, unknown> } {
+  const records = Array.isArray(data) ? data : [];
+  const series: FitnessPoint[] = [];
+
+  for (const record of records) {
+    if (!record || typeof record !== "object") continue;
+    const r = record as Record<string, unknown>;
+    const date = typeof r.id === "string" ? r.id : undefined;
+    const ctl = num(r.ctl);
+    const atl = num(r.atl);
+    if (!date || (ctl === undefined && atl === undefined)) continue;
+
+    const point: FitnessPoint = { date };
+    if (ctl !== undefined) point.ctl = round1(ctl);
+    if (atl !== undefined) point.atl = round1(atl);
+    if (ctl !== undefined && atl !== undefined) point.form = round1(ctl - atl);
+    const ramp = num(r.rampRate);
+    if (ramp !== undefined) point.ramp_rate = round1(ramp);
+    const ctlLoad = num(r.ctlLoad);
+    if (ctlLoad !== undefined) point.ctl_load = round1(ctlLoad);
+    const atlLoad = num(r.atlLoad);
+    if (atlLoad !== undefined) point.atl_load = round1(atlLoad);
+    if (date > today) point.projected = true;
+    series.push(point);
+  }
+
+  series.sort((a, b) => a.date.localeCompare(b.date));
+
+  const summary: Record<string, unknown> = {};
+  if (series.length > 0) {
+    summary.oldest = series[0];
+    summary.newest = series[series.length - 1];
+    const onToday = series.find((p) => p.date === today);
+    if (onToday) summary.today = onToday;
+  }
+
+  return { count: series.length, series, summary };
+}
+
+/** Folder records carry their children, share tokens and owner alongside the
+ *  handful of fields that identify the folder itself. */
+export const FOLDER_SUMMARY_FIELDS = [
+  "id",
+  "name",
+  "type",
+  "description",
+  "num_workouts",
+  "duration_weeks",
+  "start_date_local",
+  "activity_types",
+  "visibility",
+];

@@ -4,9 +4,9 @@ An [MCP](https://modelcontextprotocol.io) server that exposes your
 [Intervals.icu](https://intervals.icu) training data — activities, power curves,
 wellness, calendar, workouts, gear and routes — to an MCP client such as Claude.
 
-Communicates over stdio. 22 tools, 20 read-only and 2 that write
-(`update_wellness` and `create_event`). Built on v2 of the MCP TypeScript
-SDK (`@modelcontextprotocol/server`).
+Communicates over stdio. 31 tools — 22 read-only and 9 that write — plus one
+resource, the Intervals.icu workout syntax reference. Built on v2 of the MCP
+TypeScript SDK (`@modelcontextprotocol/server`).
 
 ## Requirements
 
@@ -16,14 +16,15 @@ SDK (`@modelcontextprotocol/server`).
 
 ## Configuration
 
-The server reads two environment variables and exits with a clear message if
-either is missing:
+The server reads two required environment variables and exits with a clear
+message if either is missing, plus two optional ones:
 
 | Variable | Description |
 | --- | --- |
 | `INTERVALS_API_KEY` | Your Intervals.icu API key |
 | `INTERVALS_ATHLETE_ID` | Your athlete ID, e.g. `i12345` |
 | `INTERVALS_BASE_URL` | *Optional.* API root, for pointing the client at a local fake server. Defaults to `https://intervals.icu/api/v1`; the test suite is the only thing that normally sets it. |
+| `INTERVALS_DELETE_MODE` | *Optional.* `safe` (default), `full` or `none` — how much deleting the server will do. See [Deleting](#deleting-is-gated) below. An unknown value exits with the list of valid ones. |
 
 > **Note:** there is no `dotenv` dependency, so a `.env` file is **not** loaded
 > automatically. `.env.example` is a reference for the values you need — supply
@@ -120,7 +121,7 @@ Three layers:
   schedule and its cap, per-attempt timeouts and error-body truncation. The
   backoff is injected as zero, so the retry tests do not sleep.
 - **`test/mcp.test.ts`** — the real server binary over stdio: `initialize`, then
-  `tools/list` asserting all 22 tools and their input schemas, plus `tools/call`
+  `tools/list` asserting all 31 tools and their input schemas, plus `tools/call`
   for the handler rules (the either/or on `get_activity_best_efforts`, date
   rejection before any HTTP call) and a handful of end-to-end calls against the
   fake API.
@@ -131,17 +132,29 @@ Three layers:
 
 **Activities** — `list_activities`, `get_activity`, `search_activities`,
 `get_activity_intervals`, `get_activity_streams`, `get_activity_power_curve`,
-`get_activity_best_efforts`, `get_activity_weather`
+`get_activity_best_efforts`, `get_activity_weather`, `update_activity`
+*(writes)*
 
 **Power** — `get_power_curves`
 
-**Wellness** — `list_wellness`, `get_wellness`, `update_wellness` *(writes)*
+**Wellness and fitness** — `list_wellness`, `get_wellness`,
+`update_wellness` *(writes)*, `get_fitness_chart`
 
-**Calendar** — `list_events`, `get_event`, `create_event` *(writes)*
+**Calendar** — `list_events`, `get_event`, `create_event` *(writes)*,
+`update_event` *(writes)*, `delete_event` *(writes, gated)*
 
-**Workouts** — `list_workouts`, `get_workout`
+**Workouts** — `list_workouts`, `get_workout`, `create_workout` *(writes)*,
+`update_workout` *(writes)*, `delete_workout` *(writes, gated)*,
+`list_folders`, `create_folder` *(writes)*
 
 **Gear and routes** — `list_gear`, `list_routes`, `get_route`
+
+### Resources
+
+`intervals-icu://workout-syntax` — the structured-workout text format, which
+is what `description` carries on a workout event or a library workout. Read it
+before writing a workout: the syntax fails silently, and the resource lists the
+cases where it does.
 
 ## Behaviour worth knowing
 
@@ -156,7 +169,7 @@ returned point counts. Pass `types` to fetch only the channels you need
 **Records are trimmed.** The API returns fixed, very wide records — 184 fields
 per activity, 84 per interval lap, 162 on the athlete, 62 per calendar event,
 47 per wellness day — with much of it null or irrelevant for any given sport.
-Eight tools therefore return a compact summary by default and accept a `fields`
+Nine tools therefore return a compact summary by default and accept a `fields`
 parameter. Measured against real data:
 
 | Call | Default | Full | Saving |
@@ -194,7 +207,7 @@ credentials, so they are merely absent from the default field set and can still
 be requested by name.
 
 **Dates are validated locally.** Date inputs must be `YYYY-MM-DD`
-(`create_event` also accepts `YYYY-MM-DDTHH:MM:SS`). Malformed values fail
+(`create_event` and `update_event` also accept `YYYY-MM-DDTHH:MM:SS`). Malformed values fail
 immediately with an actionable message rather than producing a confusing 422
 from the API.
 
@@ -207,32 +220,74 @@ practice.
 **Responses are compact.** Tool results are minified JSON; the indentation in
 pretty-printed output roughly doubles token cost for no benefit.
 
-**Reads and writes are labelled.** Twenty of the 22 tools only read, and are
-annotated `readOnlyHint: true` so a client can auto-approve them. Exactly two
-change anything: `update_wellness` overwrites fields on the existing record for
-a date (`destructiveHint: true`, `idempotentHint: true` — repeating the call
-leaves the record in the same state), and `create_event` adds a calendar entry
-(`destructiveHint: false`, but `idempotentHint: false`, since a second call adds
-a second entry). Every tool is `openWorldHint: true`: they all reach the
+**Structured workouts are plain text.** Workout steps are not JSON: they are
+written in Intervals.icu's own workout syntax and passed in `description` on
+`create_event`, `update_event`, `create_workout` or `update_workout`.
+Intervals.icu parses that text server-side into a structured workout with
+training load, zone targets and device sync. A description it cannot parse is
+kept verbatim as free text with no load and nothing to push to a head unit —
+and nothing in the API response says so. Because that failure is silent, the
+syntax is published as the `intervals-icu://workout-syntax` resource, including
+the traps: a bare `m` is minutes (`400m` is 400 minutes, not 400 metres —
+that is `400mtr`), and an absolute pace target needs the trailing word
+`pace`.
+
+<a id="deleting-is-gated"></a>
+**Deleting is gated.** `INTERVALS_DELETE_MODE` decides how much deleting the
+server will do, and the gate is in the server rather than in a tool argument
+because a model can set an argument itself:
+
+| Mode | Effect |
+| --- | --- |
+| `safe` (default) | The delete tools are registered, but `delete_event` refuses an event dated before today — it reads the event first and compares. Planning mistakes are removable; training history is not. |
+| `full` | Any event can be deleted, past included, with no pre-flight read. |
+| `none` | The delete tools are not registered at all, so no client can see or call them. |
+
+`delete_workout` is allowed in both `safe` and `full`: a library workout is a
+template and carries no training history of its own. Deleting one leaves
+calendar events already created from it untouched.
+
+**Reads and writes are labelled.** 22 of the 31 tools only read, and are
+annotated `readOnlyHint: true` so a client can auto-approve them. The nine
+writers come in three shapes. The updates — `update_activity`,
+`update_wellness`, `update_event`, `update_workout` — overwrite fields on an
+existing record (`destructiveHint: true`, `idempotentHint: true`: repeating
+the call leaves the record in the same state). The creates — `create_event`,
+`create_workout`, `create_folder` — only ever add (`destructiveHint: false`,
+but `idempotentHint: false`, since a second call adds a second entry). The
+deletes — `delete_event`, `delete_workout` — are `destructiveHint: true` and
+`idempotentHint: true`, since once a record is gone a second delete changes
+nothing further. Every tool is `openWorldHint: true`: they all reach the
 Intervals.icu API, whose contents this server does not control. A test asserts
 the split, so a new tool cannot be added without a hint.
 
 ## Known gaps
 
-- No `DELETE` support, so events and workouts can be created but not removed.
 - The athlete ID is fixed at startup, so coach/multi-athlete use is not possible
   without restarting with a different ID.
-- Athlete zones and fitness metrics (CTL/ATL/form) are not yet exposed.
+- Athlete zones are only reachable through `get_athlete` with
+  `fields: ["sportSettings"]`, and cannot be changed from here — there is no
+  sport-settings write, so FTP and threshold updates still mean the website.
+- The write tools added for calendar and library work — `update_activity`,
+  `update_event`, `delete_event`, `create_workout`, `update_workout`,
+  `delete_workout`, `list_folders`, `create_folder` — and
+  `get_fitness_chart` are built against the Intervals.icu OpenAPI spec and
+  tested against the fake server, but have not been exercised against a live
+  account.
+- `get_fitness_chart` reports future days as `projected` by comparing dates
+  against the host's local date, which is the athlete's own day only when the
+  server runs on their machine — the stdio case, but not a remote one.
 - No tool declares an `outputSchema`, so a client cannot validate a result
   against a promised shape before handing it to a model.
 - The test suite never contacts Intervals.icu, so it pins down this server's
   behaviour rather than the upstream API's. A change in what Intervals.icu
   actually returns would not be caught by it.
-- Of the 22 tools, five are driven end to end against the fake API
+- Of the 31 tools, twelve are driven end to end against the fake API
   (`list_activities`, `get_activity_streams`, `get_power_curves`,
-  `update_wellness`, `create_event`) and three more are exercised on their
-  error paths. The remaining fourteen are covered only at the schema level, by
-  `tools/list`.
+  `update_wellness`, `create_event`, `update_event`, `delete_event`,
+  `update_activity`, `create_workout`, `delete_workout`, `list_folders`,
+  `get_fitness_chart`) and two more are exercised on their error paths. The
+  remaining seventeen are covered only at the schema level, by `tools/list`.
 - `list_workouts`, `list_gear` and `list_routes` return zero records for the
   configured athlete, so they have never been exercised against real data and
   are unverified.

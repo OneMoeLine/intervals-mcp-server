@@ -139,4 +139,11 @@ export class IntervalsClient {
   post<T>(path: string, body: unknown): Promise<T> {
     return this.request<T>("POST", path, undefined, body);
   }
+
+  /** `delete` is a legal method name and keeps the verb honest at the call
+   *  site. Query params rather than a body: the delete endpoints take their
+   *  options in the URL. */
+  delete<T>(path: string, params?: Record<string, string>): Promise<T> {
+    return this.request<T>("DELETE", path, params);
+  }
 }

@@ -12,6 +12,8 @@ import {
   REDACTED_ATHLETE_FIELDS,
   REDACTION_MARKER,
   redact,
+  compactBody,
+  fitnessSeries,
 } from "../src/transform.js";
 
 /** 0..n-1, so a sampled value doubles as its index in the original. */
@@ -354,5 +356,130 @@ describe("redact", () => {
     for (const f of [...REDACTED_ATHLETE_FIELDS, "email", "icu_date_of_birth"]) {
       expect(ATHLETE_SUMMARY_FIELDS).not.toContain(f);
     }
+  });
+});
+
+describe("compactBody", () => {
+  it("drops undefined values", () => {
+    expect(compactBody({ a: 1, b: undefined, c: "x" })).toEqual({
+      a: 1,
+      c: "x",
+    });
+  });
+
+  it("keeps an explicit null, which is how a field is cleared", () => {
+    expect(compactBody({ a: null, b: undefined })).toEqual({ a: null });
+  });
+
+  it("keeps falsy values that are real values", () => {
+    expect(compactBody({ zero: 0, empty: "", no: false })).toEqual({
+      zero: 0,
+      empty: "",
+      no: false,
+    });
+  });
+});
+
+describe("fitnessSeries", () => {
+  const record = (
+    id: string,
+    ctl: number | null,
+    atl: number | null,
+    extra: Record<string, unknown> = {}
+  ) => ({ id, ctl, atl, ...extra });
+
+  it("computes form as CTL - ATL and rounds to one decimal", () => {
+    const { series } = fitnessSeries(
+      [record("2024-06-01", 50.44, 60.46)],
+      "2024-06-10"
+    );
+    expect(series).toEqual([
+      { date: "2024-06-01", ctl: 50.4, atl: 60.5, form: -10 },
+    ]);
+  });
+
+  it("sorts ascending by date whatever order it is given", () => {
+    const { series } = fitnessSeries(
+      [
+        record("2024-06-03", 3, 1),
+        record("2024-06-01", 1, 1),
+        record("2024-06-02", 2, 1),
+      ],
+      "2024-06-10"
+    );
+    expect(series.map((p) => p.date)).toEqual([
+      "2024-06-01",
+      "2024-06-02",
+      "2024-06-03",
+    ]);
+  });
+
+  it("drops days with no fitness data rather than zero-filling them", () => {
+    const { count, series } = fitnessSeries(
+      [
+        record("2024-06-01", 50, 40),
+        record("2024-06-02", null, null),
+        record("2024-06-03", null, 30),
+      ],
+      "2024-06-10"
+    );
+    expect(count).toBe(2);
+    expect(series.map((p) => p.date)).toEqual(["2024-06-01", "2024-06-03"]);
+    // One half of the model present: reported, but no form to compute.
+    expect(series[1]).toEqual({ date: "2024-06-03", atl: 30 });
+  });
+
+  it("flags days after today as projected and leaves the rest unmarked", () => {
+    const { series } = fitnessSeries(
+      [
+        record("2024-06-09", 50, 40),
+        record("2024-06-10", 51, 41),
+        record("2024-06-11", 52, 42),
+      ],
+      "2024-06-10"
+    );
+    expect(series.map((p) => p.projected)).toEqual([
+      undefined,
+      undefined,
+      true,
+    ]);
+  });
+
+  it("summarises the ends of the range, and today when it is in range", () => {
+    const { summary } = fitnessSeries(
+      [
+        record("2024-06-01", 50, 40),
+        record("2024-06-10", 55, 45),
+        record("2024-06-20", 60, 50),
+      ],
+      "2024-06-10"
+    );
+    expect(summary.oldest).toMatchObject({ date: "2024-06-01" });
+    expect(summary.today).toMatchObject({ date: "2024-06-10", form: 10 });
+    expect(summary.newest).toMatchObject({ date: "2024-06-20" });
+  });
+
+  it("omits today from the summary when the range does not reach it", () => {
+    const { summary } = fitnessSeries(
+      [record("2024-06-01", 50, 40)],
+      "2024-06-10"
+    );
+    expect(summary).not.toHaveProperty("today");
+  });
+
+  it("returns an empty series for a payload that is not a list", () => {
+    expect(fitnessSeries(null, "2024-06-10")).toEqual({
+      count: 0,
+      series: [],
+      summary: {},
+    });
+  });
+
+  it("carries the load pair through when present", () => {
+    const { series } = fitnessSeries(
+      [record("2024-06-01", 50, 40, { ctlLoad: 70.44, atlLoad: 80.46 })],
+      "2024-06-10"
+    );
+    expect(series[0]).toMatchObject({ ctl_load: 70.4, atl_load: 80.5 });
   });
 });

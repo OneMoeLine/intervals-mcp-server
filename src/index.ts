@@ -7,13 +7,19 @@ import {
   ACTIVITY_SUMMARY_FIELDS,
   ATHLETE_SUMMARY_FIELDS,
   DEFAULT_STREAM_POINTS,
+  EVENT_CATEGORIES,
+  EVENT_CATEGORY_HELP,
   EVENT_SUMMARY_FIELDS,
+  FITNESS_FIELDS,
+  FOLDER_SUMMARY_FIELDS,
   INTERVAL_SUMMARY_FIELDS,
   POWER_CURVE_SUMMARY_FIELDS,
   REDACTED_ATHLETE_FIELDS,
   WELLNESS_SUMMARY_FIELDS,
+  compactBody,
   downsampleStreams,
   fieldsParam,
+  fitnessSeries,
   isoDate,
   isoDateTime,
   project,
@@ -21,6 +27,7 @@ import {
   redact,
   score,
 } from "./transform.js";
+import { WORKOUT_SYNTAX } from "./workout-syntax.js";
 
 const API_KEY = process.env.INTERVALS_API_KEY;
 const ATHLETE_ID = process.env.INTERVALS_ATHLETE_ID;
@@ -46,10 +53,73 @@ function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
 
-/** Annotations for the twenty tools that only read. `openWorldHint` is true
- *  for every tool here: they all reach the Intervals.icu API, whose contents
- *  this server does not control. */
+/** Annotations for the tools that only read. `openWorldHint` is true for
+ *  every tool in this file: they all reach the Intervals.icu API, whose
+ *  contents this server does not control. */
 const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
+/** A write that overwrites fields on an existing record: destructive in the
+ *  MCP sense, and the same call twice leaves the record in the same state. */
+const UPDATE = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+/** A write that only ever adds. Not destructive - but each call adds another
+ *  record, so repeating it is not a no-op. */
+const CREATE = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
+
+/** A delete: destructive, and once it has happened, repeating it changes
+ *  nothing further. */
+const DELETE = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+/** How much deleting this server is willing to do. The gate is here rather
+ *  than in a tool argument because a model can set an argument itself:
+ *
+ *    safe (default) - delete tools are registered, but a calendar event that
+ *                     has already happened is refused. Planning mistakes are
+ *                     removable; training history is not.
+ *    full           - any event can be deleted, past included.
+ *    none           - the delete tools are not registered at all, so no
+ *                     client can see or call them.
+ *
+ *  The library-workout delete is unconstrained in both safe and full: a
+ *  workout template carries no history of its own. */
+const DELETE_MODES = ["safe", "full", "none"] as const;
+type DeleteMode = (typeof DELETE_MODES)[number];
+
+const requestedDeleteMode = (
+  process.env.INTERVALS_DELETE_MODE ?? "safe"
+).toLowerCase();
+
+if (!DELETE_MODES.includes(requestedDeleteMode as DeleteMode)) {
+  console.error(
+    `Invalid INTERVALS_DELETE_MODE: ${requestedDeleteMode}. ` +
+      `Valid values are: ${DELETE_MODES.join(", ")}`
+  );
+  process.exit(1);
+}
+
+const DELETE_MODE = requestedDeleteMode as DeleteMode;
+
+/** Today as YYYY-MM-DD in the host's local timezone, which is the athlete's
+ *  own day whenever the server runs on their machine - the stdio case. Read
+ *  per call rather than once at startup, so a long-running server does not
+ *  keep yesterday's idea of "past". */
+function localToday(): string {
+  return new Date().toLocaleDateString("en-CA");
+}
 
 // ── Athlete ───────────────────────────────────────────────────────────────────
 
@@ -313,6 +383,58 @@ server.registerTool(
     json(await client.get(`/activity/${activity_id}/weather-summary`))
 );
 
+server.registerTool(
+  "update_activity",
+  {
+    title: "Update activity",
+    description:
+      "Change the editable fields on a completed activity: its name, description, " +
+      "sport type, tags and the subjective scores. Only supply what should change - " +
+      "omitted fields are left alone. Recorded data (power, HR, GPS) is not " +
+      "editable here.",
+    inputSchema: z.object({
+      activity_id: z.string().describe("The activity ID"),
+      name: z.string().optional().describe("Activity title"),
+      description: z.string().optional().describe("Activity notes"),
+      type: z
+        .string()
+        .optional()
+        .describe(
+          "Sport type, which the API validates strictly e.g. Ride, VirtualRide, " +
+            "GravelRide, Run, TrailRun, Swim, WeightTraining"
+        ),
+      sub_type: z
+        .enum(["NONE", "COMMUTE", "WARMUP", "COOLDOWN", "RACE"])
+        .optional()
+        .describe("Activity sub-type"),
+      race: z.boolean().optional().describe("Mark the activity as a race"),
+      trainer: z.boolean().optional().describe("Recorded indoors on a trainer"),
+      commute: z.boolean().optional().describe("Mark the activity as a commute"),
+      tags: z
+        .array(z.string())
+        .optional()
+        .describe("Replaces the full tag list - include tags to keep"),
+      feel: z
+        .number()
+        .int()
+        .min(1)
+        .max(5)
+        .optional()
+        .describe("How it felt, 1 (terrible) to 5 (great)"),
+      icu_rpe: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("Rate of perceived exertion, 1-10"),
+    }),
+    annotations: UPDATE,
+  },
+  async ({ activity_id, ...fields }) =>
+    json(await client.put(`/activity/${activity_id}`, compactBody(fields)))
+);
+
 // ── Power & Performance ───────────────────────────────────────────────────────
 
 server.registerTool(
@@ -442,23 +564,44 @@ server.registerTool(
         .describe("Calories consumed"),
       notes: z.string().optional().describe("Free text notes"),
     }),
-    // Overwrites fields on the existing record for that date, so destructive;
-    // the same call twice leaves the record in the same state, so idempotent.
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: true,
-      openWorldHint: true,
-    },
+    annotations: UPDATE,
   },
-  async ({ date, ...fields }) => {
-    // Remove undefined fields
-    const body = Object.fromEntries(
-      Object.entries(fields).filter(([, v]) => v !== undefined)
-    );
-    return json(
-      await client.put(`/athlete/${client.athleteId}/wellness/${date}`, body)
-    );
+  async ({ date, ...fields }) =>
+    json(
+      await client.put(
+        `/athlete/${client.athleteId}/wellness/${date}`,
+        compactBody(fields)
+      )
+    )
+);
+
+server.registerTool(
+  "get_fitness_chart",
+  {
+    title: "Get fitness chart (CTL/ATL/form)",
+    description:
+      "The performance management chart as a daily series: CTL (fitness), ATL " +
+      "(fatigue) and form, which is CTL - ATL and is also called TSB. Use it for " +
+      "fitness trend, freshness and taper questions. Days with no fitness data " +
+      "are omitted rather than zero-filled. A `newest` in the future returns the " +
+      "projection from planned calendar workouts, with each such point flagged " +
+      "`projected: true` - those are a plan, not a measurement, and appear only " +
+      "if the athlete has 'include planned workouts in fitness' enabled on " +
+      "Intervals.icu.",
+    inputSchema: z.object({
+      oldest: isoDate("Start date YYYY-MM-DD (inclusive)"),
+      newest: isoDate(
+        "End date YYYY-MM-DD (inclusive). A future date returns projections."
+      ),
+    }),
+    annotations: READ_ONLY,
+  },
+  async ({ oldest, newest }) => {
+    const data = await client.get(`/athlete/${client.athleteId}/wellness`, {
+      oldest,
+      newest,
+    });
+    return json(fitnessSeries(project(data, FITNESS_FIELDS), localToday()));
   }
 );
 
@@ -514,29 +657,89 @@ server.registerTool(
   {
     title: "Create calendar event",
     description:
-      "Create an event on the athlete's training calendar (planned workout, race, note, etc.).",
+      "Create an event on the athlete's training calendar: a planned workout, a " +
+      "race, a note, time off. For a structured workout, pass category WORKOUT " +
+      "and put Intervals.icu workout syntax in `description` - Intervals.icu " +
+      "parses it into steps with training load and zone targets. The syntax is " +
+      "the `intervals-icu://workout-syntax` resource; a description it cannot " +
+      "parse is silently kept as plain text with no load. " +
+      EVENT_CATEGORY_HELP,
     inputSchema: z.object({
       start_date_local: isoDateTime(
         "Start date/time in ISO 8601 format e.g. 2024-06-01T08:00:00"
       ),
-      category: z
-        .enum([
-          "WORKOUT",
-          "RACE",
-          "NOTE",
-          "HOLIDAY",
-          "TARGET",
-          "SICK",
-          "TRAVEL",
-          "STRENGTH",
-        ])
-        .describe("Event category"),
+      category: z.enum(EVENT_CATEGORIES).describe("Event category"),
       name: z.string().optional().describe("Event name/title"),
-      description: z.string().optional().describe("Event notes or description"),
+      description: z
+        .string()
+        .optional()
+        .describe(
+          "Event notes, or workout syntax for a structured WORKOUT - see the " +
+            "intervals-icu://workout-syntax resource"
+        ),
       type: z
         .string()
         .optional()
-        .describe("Sport type e.g. Ride, Run, Swim, WeightTraining"),
+        .describe(
+          "Sport type, validated strictly by the API and required for races " +
+            "e.g. Ride, VirtualRide, Run, Swim, WeightTraining"
+        ),
+      end_date_local: isoDateTime(
+        "End date/time for a ranged event - PLAN, HOLIDAY, SICK, INJURED"
+      ).optional(),
+      moving_time: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "Planned duration in seconds. Omit for a workout whose steps already " +
+            "set the duration."
+        ),
+      distance: z
+        .number()
+        .positive()
+        .optional()
+        .describe("Planned distance in meters"),
+      indoor: z.boolean().optional().describe("Planned as an indoor session"),
+      target: z
+        .enum(["AUTO", "POWER", "HR", "PACE"])
+        .optional()
+        .describe("Which metric the workout's targets are expressed against"),
+    }),
+    annotations: CREATE,
+  },
+  async (fields) =>
+    json(
+      await client.post(
+        `/athlete/${client.athleteId}/events`,
+        compactBody(fields)
+      )
+    )
+);
+
+server.registerTool(
+  "update_event",
+  {
+    title: "Update calendar event",
+    description:
+      "Change an existing calendar event. Only supply what should change - " +
+      "omitted fields are left alone. Rewriting `description` on a WORKOUT " +
+      "replaces its steps, so send the whole workout, not a fragment. " +
+      EVENT_CATEGORY_HELP,
+    inputSchema: z.object({
+      event_id: z.number().int().describe("The event ID"),
+      name: z.string().optional().describe("Event name/title"),
+      description: z
+        .string()
+        .optional()
+        .describe(
+          "Event notes, or workout syntax for a structured WORKOUT - see the " +
+            "intervals-icu://workout-syntax resource"
+        ),
+      category: z.enum(EVENT_CATEGORIES).optional().describe("Event category"),
+      type: z.string().optional().describe("Sport type e.g. Ride, Run, Swim"),
+      start_date_local: isoDateTime("Start date/time in ISO 8601 format").optional(),
+      end_date_local: isoDateTime("End date/time for a ranged event").optional(),
       moving_time: z
         .number()
         .positive()
@@ -547,35 +750,65 @@ server.registerTool(
         .positive()
         .optional()
         .describe("Planned distance in meters"),
+      indoor: z.boolean().optional().describe("Planned as an indoor session"),
+      target: z
+        .enum(["AUTO", "POWER", "HR", "PACE"])
+        .optional()
+        .describe("Which metric the workout's targets are expressed against"),
     }),
-    // Only ever adds, so not destructive - but each call adds another entry,
-    // so repeating it is not a no-op.
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: true,
-    },
+    annotations: UPDATE,
   },
-  async ({
-    start_date_local,
-    category,
-    name,
-    description,
-    type,
-    moving_time,
-    distance,
-  }) => {
-    const body: Record<string, unknown> = { start_date_local, category };
-    if (name !== undefined) body.name = name;
-    if (description !== undefined) body.description = description;
-    if (type !== undefined) body.type = type;
-    if (moving_time !== undefined) body.moving_time = moving_time;
-    if (distance !== undefined) body.distance = distance;
-
-    return json(await client.post(`/athlete/${client.athleteId}/events`, body));
-  }
+  async ({ event_id, ...fields }) =>
+    json(
+      await client.put(
+        `/athlete/${client.athleteId}/events/${event_id}`,
+        compactBody(fields)
+      )
+    )
 );
+
+if (DELETE_MODE !== "none") {
+  server.registerTool(
+    "delete_event",
+    {
+      title: "Delete calendar event",
+      description:
+        "Delete one event from the training calendar, by ID. Deletes only the " +
+        "event given: other events created in the same batch are left alone." +
+        (DELETE_MODE === "safe"
+          ? " This server runs in delete mode `safe`, so an event dated before " +
+            "today is refused - planning mistakes are removable, training " +
+            "history is not."
+          : " This server runs in delete mode `full`, so past events can be " +
+            "deleted too."),
+      inputSchema: z.object({
+        event_id: z.number().int().describe("The event ID"),
+      }),
+      annotations: DELETE,
+    },
+    async ({ event_id }) => {
+      if (DELETE_MODE === "safe") {
+        // Read before deleting, so "is this in the past" is answered by the
+        // calendar rather than by whatever the caller believes.
+        const existing = await client.get<{ start_date_local?: string }>(
+          `/athlete/${client.athleteId}/events/${event_id}`
+        );
+        const date = existing?.start_date_local?.slice(0, 10);
+        const today = localToday();
+        if (date && date < today) {
+          throw new Error(
+            `Refusing to delete event ${event_id}: it is dated ${date}, before ` +
+              `today (${today}), and INTERVALS_DELETE_MODE is "safe". Set ` +
+              `INTERVALS_DELETE_MODE=full to allow deleting past events.`
+          );
+        }
+      }
+      return json(
+        await client.delete(`/athlete/${client.athleteId}/events/${event_id}`)
+      );
+    }
+  );
+}
 
 // ── Workouts Library ──────────────────────────────────────────────────────────
 
@@ -602,6 +835,189 @@ server.registerTool(
   },
   async ({ workout_id }) =>
     json(await client.get(`/athlete/${client.athleteId}/workouts/${workout_id}`))
+);
+
+server.registerTool(
+  "create_workout",
+  {
+    title: "Create library workout",
+    description:
+      "Save a reusable workout into a folder or training plan in the athlete's " +
+      "library. Put Intervals.icu workout syntax in `description` to give it " +
+      "steps - see the `intervals-icu://workout-syntax` resource. Needs a " +
+      "folder: call list_folders, or create_folder first.",
+    inputSchema: z.object({
+      folder_id: z
+        .number()
+        .int()
+        .describe("ID of the folder or plan to save into - see list_folders"),
+      name: z.string().describe("Workout name"),
+      description: z
+        .string()
+        .optional()
+        .describe(
+          "Workout syntax defining the steps - see the " +
+            "intervals-icu://workout-syntax resource"
+        ),
+      type: z
+        .string()
+        .optional()
+        .describe(
+          "Sport type, validated strictly by the API e.g. Ride, VirtualRide, " +
+            "Run, Swim, WeightTraining"
+        ),
+      moving_time: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "Duration in seconds. Omit when the steps already set the duration."
+        ),
+      distance: z.number().positive().optional().describe("Distance in meters"),
+      indoor: z.boolean().optional().describe("An indoor session"),
+      target: z
+        .enum(["AUTO", "POWER", "HR", "PACE"])
+        .optional()
+        .describe("Which metric the targets are expressed against"),
+      day: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Day within a training plan, 1-based (plans only)"),
+    }),
+    annotations: CREATE,
+  },
+  async (fields) =>
+    json(
+      await client.post(
+        `/athlete/${client.athleteId}/workouts`,
+        compactBody(fields)
+      )
+    )
+);
+
+server.registerTool(
+  "update_workout",
+  {
+    title: "Update library workout",
+    description:
+      "Change a workout in the library. Only supply what should change. " +
+      "Rewriting `description` replaces the workout's steps, so send the whole " +
+      "workout rather than a fragment.",
+    inputSchema: z.object({
+      workout_id: z.string().describe("The workout ID"),
+      name: z.string().optional().describe("Workout name"),
+      description: z
+        .string()
+        .optional()
+        .describe(
+          "Workout syntax defining the steps - see the " +
+            "intervals-icu://workout-syntax resource"
+        ),
+      type: z.string().optional().describe("Sport type e.g. Ride, Run, Swim"),
+      folder_id: z
+        .number()
+        .int()
+        .optional()
+        .describe("Move the workout to this folder or plan"),
+      moving_time: z
+        .number()
+        .positive()
+        .optional()
+        .describe("Duration in seconds"),
+      distance: z.number().positive().optional().describe("Distance in meters"),
+      indoor: z.boolean().optional().describe("An indoor session"),
+      target: z
+        .enum(["AUTO", "POWER", "HR", "PACE"])
+        .optional()
+        .describe("Which metric the targets are expressed against"),
+      day: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Day within a training plan, 1-based (plans only)"),
+    }),
+    annotations: UPDATE,
+  },
+  async ({ workout_id, ...fields }) =>
+    json(
+      await client.put(
+        `/athlete/${client.athleteId}/workouts/${workout_id}`,
+        compactBody(fields)
+      )
+    )
+);
+
+if (DELETE_MODE !== "none") {
+  server.registerTool(
+    "delete_workout",
+    {
+      title: "Delete library workout",
+      description:
+        "Delete a workout from the athlete's library by ID. This removes the " +
+        "template only - calendar events already created from it are not " +
+        "touched. A workout template carries no training history, so this is " +
+        "allowed in both `safe` and `full` delete modes.",
+      inputSchema: z.object({
+        workout_id: z.string().describe("The workout ID"),
+      }),
+      annotations: DELETE,
+    },
+    async ({ workout_id }) =>
+      json(
+        await client.delete(
+          `/athlete/${client.athleteId}/workouts/${workout_id}`
+        )
+      )
+  );
+}
+
+server.registerTool(
+  "list_folders",
+  {
+    title: "List workout folders and plans",
+    description:
+      "List the folders and training plans in the athlete's workout library. " +
+      "`type` distinguishes a plain FOLDER from a PLAN. Use this to find the " +
+      "folder_id that create_workout needs.",
+    inputSchema: z.object({
+      fields: fieldsParam(FOLDER_SUMMARY_FIELDS, 24),
+    }),
+    annotations: READ_ONLY,
+  },
+  async ({ fields }) => {
+    const data = await client.get(`/athlete/${client.athleteId}/folders`);
+    return json(project(data, fields ?? FOLDER_SUMMARY_FIELDS));
+  }
+);
+
+server.registerTool(
+  "create_folder",
+  {
+    title: "Create workout folder or plan",
+    description:
+      "Create a folder for library workouts, or a training plan - a PLAN is a " +
+      "folder whose workouts are laid out by day and can be applied to the " +
+      "calendar as a block.",
+    inputSchema: z.object({
+      name: z.string().describe("Folder or plan name"),
+      type: z
+        .enum(["FOLDER", "PLAN"])
+        .optional()
+        .describe("FOLDER (default) or PLAN"),
+      description: z.string().optional().describe("Folder description"),
+    }),
+    annotations: CREATE,
+  },
+  async (fields) =>
+    json(
+      await client.post(
+        `/athlete/${client.athleteId}/folders`,
+        compactBody(fields)
+      )
+    )
 );
 
 // ── Gear ─────────────────────────────────────────────────────────────────────
@@ -642,6 +1058,25 @@ server.registerTool(
   },
   async ({ route_id }) =>
     json(await client.get(`/athlete/${client.athleteId}/routes/${route_id}`))
+);
+
+// ── Resources ─────────────────────────────────────────────────────────────────
+
+server.registerResource(
+  "workout-syntax",
+  "intervals-icu://workout-syntax",
+  {
+    title: "Intervals.icu workout syntax",
+    description:
+      "How to write structured workout steps for the `description` field of a " +
+      "WORKOUT event or a library workout: sections, repeats, step lengths and " +
+      "power/HR/pace targets, with the silent-failure cases called out. Read " +
+      "this before writing a workout.",
+    mimeType: "text/markdown",
+  },
+  async (uri) => ({
+    contents: [{ uri: uri.href, text: WORKOUT_SYNTAX }],
+  })
 );
 
 // ── Start server ──────────────────────────────────────────────────────────────

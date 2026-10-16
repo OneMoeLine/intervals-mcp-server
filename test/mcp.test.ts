@@ -15,23 +15,44 @@ const EXPECTED_TOOLS = [
   "get_activity_power_curve",
   "get_activity_best_efforts",
   "get_activity_weather",
+  "update_activity",
   "get_power_curves",
   "list_wellness",
   "get_wellness",
   "update_wellness",
+  "get_fitness_chart",
   "list_events",
   "get_event",
   "create_event",
+  "update_event",
+  "delete_event",
   "list_workouts",
   "get_workout",
+  "create_workout",
+  "update_workout",
+  "delete_workout",
+  "list_folders",
+  "create_folder",
   "list_gear",
   "list_routes",
   "get_route",
 ];
 
-/** The only two tools that change anything upstream. Everything else must
- *  report `readOnlyHint: true`, which is what lets a client auto-approve it. */
-const EXPECTED_WRITERS = ["create_event", "update_wellness"];
+/** Every tool that changes something upstream, sorted. Everything else must
+ *  report `readOnlyHint: true`, which is what lets a client auto-approve it.
+ *  The two delete tools are here because the default delete mode registers
+ *  them; "none" takes them away, which has its own test. */
+const EXPECTED_WRITERS = [
+  "create_event",
+  "create_folder",
+  "create_workout",
+  "delete_event",
+  "delete_workout",
+  "update_activity",
+  "update_event",
+  "update_wellness",
+  "update_workout",
+];
 
 let fake: FakeServer;
 let server: ServerProcess;
@@ -77,8 +98,8 @@ describe("startup", () => {
 });
 
 describe("tools/list", () => {
-  it("exposes all 22 tools", () => {
-    expect(tools).toHaveLength(22);
+  it("exposes all 31 tools", () => {
+    expect(tools).toHaveLength(31);
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());
   });
 
@@ -143,7 +164,7 @@ describe("tools/list", () => {
     }
   });
 
-  it("reports exactly two writers, and they are the expected two", () => {
+  it("reports exactly nine writers, and they are the expected nine", () => {
     const writers = tools
       .filter((t) => t.annotations?.readOnlyHint === false)
       .map((t) => t.name)
@@ -180,9 +201,15 @@ describe("tools/list", () => {
       destructiveHint: false,
       idempotentHint: false,
     });
+    // Destructive, and once it is gone a second delete changes nothing more.
+    expect(annotationsFor("delete_event")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+    });
   });
 
-  it("offers a fields parameter on each of the eight trimming tools", () => {
+  it("offers a fields parameter on each of the nine trimming tools", () => {
     const withFields = tools
       .filter((t) => "fields" in t.inputSchema.properties)
       .map((t) => t.name)
@@ -195,6 +222,7 @@ describe("tools/list", () => {
       "get_power_curves",
       "list_activities",
       "list_events",
+      "list_folders",
       "list_wellness",
     ]);
   });
@@ -411,5 +439,299 @@ describe("tools/call against the fake API", () => {
     });
     expect(res.result.isError).toBe(true);
     expect(res.result.content[0].text).toMatch(/404: activity not found/);
+  });
+});
+
+describe("write tools against the fake API", () => {
+  it("rejects a category the API does not have, before any HTTP call", async () => {
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "create_event",
+      arguments: {
+        start_date_local: "2024-07-01T08:00:00",
+        // The obvious guess, and not a category: races are RACE_A/B/C.
+        category: "RACE",
+        type: "Ride",
+      },
+    });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toMatch(/RACE_A/);
+    expect(fake.requests).toHaveLength(before);
+  });
+
+  it("carries workout syntax through create_event as the description", async () => {
+    fake.replyWith({ body: { id: 101 } });
+    const steps = "Warmup\n- 10m 60%\n\nMain Set 3x\n- 5m 105%\n- 3m 50%\n";
+    await server.request("tools/call", {
+      name: "create_event",
+      arguments: {
+        start_date_local: "2024-07-02T06:30:00",
+        category: "WORKOUT",
+        type: "Ride",
+        name: "VO2 blocks",
+        description: steps,
+        indoor: true,
+        target: "POWER",
+      },
+    });
+
+    const sent = fake.requests[fake.requests.length - 1];
+    expect(sent.method).toBe("POST");
+    expect(sent.path).toBe("/athlete/i1/events");
+    // Sent verbatim: Intervals.icu is what parses the steps, not this server.
+    expect(JSON.parse(sent.body)).toEqual({
+      start_date_local: "2024-07-02T06:30:00",
+      category: "WORKOUT",
+      type: "Ride",
+      name: "VO2 blocks",
+      description: steps,
+      indoor: true,
+      target: "POWER",
+    });
+  });
+
+  it("PUTs only the supplied fields on update_activity", async () => {
+    fake.replyWith({ body: { id: "a1" } });
+    await server.request("tools/call", {
+      name: "update_activity",
+      arguments: { activity_id: "a1", name: "Evening Ride", icu_rpe: 7 },
+    });
+
+    const sent = fake.requests[fake.requests.length - 1];
+    expect(sent.method).toBe("PUT");
+    expect(sent.path).toBe("/activity/a1");
+    expect(JSON.parse(sent.body)).toEqual({ name: "Evening Ride", icu_rpe: 7 });
+  });
+
+  it("PUTs an event update to the path for that event", async () => {
+    fake.replyWith({ body: { id: 42 } });
+    await server.request("tools/call", {
+      name: "update_event",
+      arguments: { event_id: 42, name: "Moved to Tuesday", moving_time: 3600 },
+    });
+
+    const sent = fake.requests[fake.requests.length - 1];
+    expect(sent.method).toBe("PUT");
+    expect(sent.path).toBe("/athlete/i1/events/42");
+    expect(JSON.parse(sent.body)).toEqual({
+      name: "Moved to Tuesday",
+      moving_time: 3600,
+    });
+  });
+
+  it("POSTs a library workout into its folder", async () => {
+    fake.replyWith({ body: { id: 7 } });
+    await server.request("tools/call", {
+      name: "create_workout",
+      arguments: {
+        folder_id: 3,
+        name: "Sweet spot 3x12",
+        type: "Ride",
+        description: "Main Set 3x\n- 12m 90%\n- 5m 55%\n",
+      },
+    });
+
+    const sent = fake.requests[fake.requests.length - 1];
+    expect(sent.method).toBe("POST");
+    expect(sent.path).toBe("/athlete/i1/workouts");
+    expect(JSON.parse(sent.body)).toMatchObject({
+      folder_id: 3,
+      name: "Sweet spot 3x12",
+      type: "Ride",
+    });
+  });
+
+  it("DELETEs a library workout without reading it first", async () => {
+    fake.replyWith({ body: {} });
+    const before = fake.requests.length;
+    await server.request("tools/call", {
+      name: "delete_workout",
+      arguments: { workout_id: "w9" },
+    });
+
+    const sent = fake.requests.slice(before);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].method).toBe("DELETE");
+    expect(sent[0].path).toBe("/athlete/i1/workouts/w9");
+  });
+
+  it("trims folder records on list_folders", async () => {
+    fake.replyWith({
+      body: [
+        {
+          id: 3,
+          name: "Base plan",
+          type: "PLAN",
+          description: null,
+          num_workouts: 24,
+          duration_weeks: 8,
+          start_date_local: null,
+          activity_types: ["Ride"],
+          visibility: "PRIVATE",
+          shareToken: "secret-token",
+          children: [{ id: 1 }],
+        },
+      ],
+    });
+    const res = await server.request("tools/call", {
+      name: "list_folders",
+      arguments: {},
+    });
+    const payload = JSON.parse(res.result.content[0].text);
+    expect(payload[0]).not.toHaveProperty("shareToken");
+    expect(payload[0]).not.toHaveProperty("children");
+    expect(payload[0]).toMatchObject({ id: 3, name: "Base plan", type: "PLAN" });
+  });
+});
+
+describe("get_fitness_chart", () => {
+  /** The API returns a fixed key set per wellness record, nulls included. */
+  const record = (
+    id: string,
+    ctl: number | null,
+    atl: number | null,
+    rampRate: number | null = null
+  ) => ({ id, ctl, atl, rampRate, ctlLoad: null, atlLoad: null });
+
+  it("builds a CTL/ATL/form series and flags the projected days", async () => {
+    fake.replyWith({
+      body: [
+        // Out of order on purpose: the series comes back ascending.
+        record("2024-06-02", 50.44, 60.46, 1.27),
+        record("2024-06-01", 49.9, 55.1),
+        // No fitness data at all: dropped, not zero-filled.
+        record("2024-06-03", null, null),
+        // Far enough out to be a projection whenever this test runs.
+        record("2999-01-01", 70, 40),
+      ],
+    });
+    const res = await server.request("tools/call", {
+      name: "get_fitness_chart",
+      arguments: { oldest: "2024-06-01", newest: "2999-01-01" },
+    });
+
+    expect(fake.requests[fake.requests.length - 1].query).toEqual({
+      oldest: "2024-06-01",
+      newest: "2999-01-01",
+    });
+    const payload = JSON.parse(res.result.content[0].text);
+    expect(payload.count).toBe(3);
+    expect(payload.series.map((p: any) => p.date)).toEqual([
+      "2024-06-01",
+      "2024-06-02",
+      "2999-01-01",
+    ]);
+    // form is CTL - ATL, rounded like the values it is computed from.
+    expect(payload.series[0]).toEqual({
+      date: "2024-06-01",
+      ctl: 49.9,
+      atl: 55.1,
+      form: -5.2,
+    });
+    expect(payload.series[1].ramp_rate).toBe(1.3);
+    expect(payload.series[1].projected).toBeUndefined();
+    expect(payload.series[2].projected).toBe(true);
+    expect(payload.summary.oldest.date).toBe("2024-06-01");
+    expect(payload.summary.newest.date).toBe("2999-01-01");
+  });
+});
+
+describe("delete modes", () => {
+  it("refuses a past event in the default safe mode, and sends no DELETE", async () => {
+    fake.replyWith({
+      body: { id: 5, start_date_local: "2020-01-01T09:00:00" },
+    });
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "delete_event",
+      arguments: { event_id: 5 },
+    });
+
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toMatch(/dated 2020-01-01/);
+    expect(res.result.content[0].text).toMatch(/INTERVALS_DELETE_MODE=full/);
+    const sent = fake.requests.slice(before);
+    expect(sent.map((r) => r.method)).toEqual(["GET"]);
+  });
+
+  it("deletes a future event in safe mode", async () => {
+    fake.replyUsing((req) =>
+      req.method === "GET"
+        ? { body: { id: 6, start_date_local: "2999-01-01T09:00:00" } }
+        : { body: {} }
+    );
+    const before = fake.requests.length;
+    await server.request("tools/call", {
+      name: "delete_event",
+      arguments: { event_id: 6 },
+    });
+
+    const sent = fake.requests.slice(before);
+    expect(sent.map((r) => r.method)).toEqual(["GET", "DELETE"]);
+    expect(sent[1].path).toBe("/athlete/i1/events/6");
+    fake.replyWith({ status: 200, body: {} });
+  });
+
+  it("deletes a past event in full mode, without reading it first", async () => {
+    const { server: s } = await ServerProcess.start({
+      INTERVALS_BASE_URL: fake.baseUrl,
+      INTERVALS_DELETE_MODE: "full",
+    });
+    fake.replyWith({ body: {} });
+    const before = fake.requests.length;
+    await s.request("tools/call", {
+      name: "delete_event",
+      arguments: { event_id: 7 },
+    });
+
+    const sent = fake.requests.slice(before);
+    expect(sent.map((r) => r.method)).toEqual(["DELETE"]);
+    expect(sent[0].path).toBe("/athlete/i1/events/7");
+    await s.stop();
+  }, 20_000);
+
+  it("does not register the delete tools at all in none mode", async () => {
+    const { server: s } = await ServerProcess.start({
+      INTERVALS_BASE_URL: fake.baseUrl,
+      INTERVALS_DELETE_MODE: "none",
+    });
+    const res = await s.request("tools/list");
+    const names = res.result.tools.map((t: any) => t.name);
+    expect(names).toHaveLength(EXPECTED_TOOLS.length - 2);
+    expect(names).not.toContain("delete_event");
+    expect(names).not.toContain("delete_workout");
+    // The rest of the server is unaffected.
+    expect(names).toContain("create_event");
+    await s.stop();
+  }, 20_000);
+
+  it("exits with a clear message on an unknown delete mode", async () => {
+    const { code, stderr } = await runUntilExit({
+      INTERVALS_API_KEY: "test-key",
+      INTERVALS_ATHLETE_ID: "i1",
+      INTERVALS_DELETE_MODE: "wipe-everything",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/Invalid INTERVALS_DELETE_MODE: wipe-everything/);
+    expect(stderr).toMatch(/safe, full, none/);
+  }, 20_000);
+});
+
+describe("resources", () => {
+  it("publishes the workout syntax reference", async () => {
+    const res = await server.request("resources/list");
+    const uris = res.result.resources.map((r: any) => r.uri);
+    expect(uris).toContain("intervals-icu://workout-syntax");
+  });
+
+  it("serves the syntax, including the traps that fail silently", async () => {
+    const res = await server.request("resources/read", {
+      uri: "intervals-icu://workout-syntax",
+    });
+    const text = res.result.contents[0].text as string;
+    expect(res.result.contents[0].uri).toBe("intervals-icu://workout-syntax");
+    // The two mistakes that produce a wrong workout with no error:
+    expect(text).toMatch(/is 400 minutes, not 400 metres/);
+    expect(text).toMatch(/required on every pace target/);
   });
 });
