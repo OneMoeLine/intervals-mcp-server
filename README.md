@@ -206,15 +206,24 @@ practice.
 **Responses are compact.** Tool results are minified JSON; the indentation in
 pretty-printed output roughly doubles token cost for no benefit.
 
+**Reads and writes are labelled.** Twenty of the 22 tools only read, and are
+annotated `readOnlyHint: true` so a client can auto-approve them. Exactly two
+change anything: `update_wellness` overwrites fields on the existing record for
+a date (`destructiveHint: true`, `idempotentHint: true` — repeating the call
+leaves the record in the same state), and `create_event` adds a calendar entry
+(`destructiveHint: false`, but `idempotentHint: false`, since a second call adds
+a second entry). Every tool is `openWorldHint: true`: they all reach the
+Intervals.icu API, whose contents this server does not control. A test asserts
+the split, so a new tool cannot be added without a hint.
+
 ## Known gaps
 
 - No `DELETE` support, so events and workouts can be created but not removed.
 - The athlete ID is fixed at startup, so coach/multi-athlete use is not possible
   without restarting with a different ID.
 - Athlete zones and fitness metrics (CTL/ATL/form) are not yet exposed.
-- Tools use the SDK's deprecated `server.tool()` API rather than `registerTool`,
-  so they carry no `readOnlyHint`/`destructiveHint` annotations and no
-  `outputSchema`.
+- No tool declares an `outputSchema`, so a client cannot validate a result
+  against a promised shape before handing it to a model.
 - The test suite never contacts Intervals.icu, so it pins down this server's
   behaviour rather than the upstream API's. A change in what Intervals.icu
   actually returns would not be caught by it.

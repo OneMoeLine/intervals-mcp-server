@@ -29,6 +29,10 @@ const EXPECTED_TOOLS = [
   "get_route",
 ];
 
+/** The only two tools that change anything upstream. Everything else must
+ *  report `readOnlyHint: true`, which is what lets a client auto-approve it. */
+const EXPECTED_WRITERS = ["create_event", "update_wellness"];
+
 let fake: FakeServer;
 let server: ServerProcess;
 let tools: any[];
@@ -131,6 +135,51 @@ describe("tools/list", () => {
     // enforced in the handler instead - see the tools/call tests below.
     expect(schema.required).not.toContain("duration");
     expect(schema.required).not.toContain("distance");
+  });
+
+  it("gives every tool a title", () => {
+    for (const tool of tools) {
+      expect(tool.title, `${tool.name} title`).toBeTruthy();
+    }
+  });
+
+  it("reports exactly two writers, and they are the expected two", () => {
+    const writers = tools
+      .filter((t) => t.annotations?.readOnlyHint === false)
+      .map((t) => t.name)
+      .sort();
+    expect(writers).toEqual(EXPECTED_WRITERS);
+  });
+
+  it("marks every other tool read-only and reaching an external API", () => {
+    for (const tool of tools) {
+      expect(tool.annotations, `${tool.name} annotations`).toBeDefined();
+      expect(tool.annotations.openWorldHint, `${tool.name} openWorldHint`).toBe(
+        true
+      );
+      if (EXPECTED_WRITERS.includes(tool.name)) continue;
+      expect(tool.annotations.readOnlyHint, `${tool.name} readOnlyHint`).toBe(
+        true
+      );
+    }
+  });
+
+  it("describes each writer's destructiveness and idempotence", () => {
+    const annotationsFor = (name: string) =>
+      tools.find((t) => t.name === name).annotations;
+    // Overwrites fields on an existing record, and repeating the call leaves
+    // that record in the same state.
+    expect(annotationsFor("update_wellness")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+    });
+    // Only ever adds - but a second call adds a second calendar entry.
+    expect(annotationsFor("create_event")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    });
   });
 
   it("offers a fields parameter on each of the eight trimming tools", () => {
