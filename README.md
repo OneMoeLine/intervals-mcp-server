@@ -5,12 +5,13 @@ An [MCP](https://modelcontextprotocol.io) server that exposes your
 wellness, calendar, workouts, gear and routes — to an MCP client such as Claude.
 
 Communicates over stdio. 22 tools, 20 read-only and 2 that write
-(`update_wellness` and `create_event`).
+(`update_wellness` and `create_event`). Built on v2 of the MCP TypeScript
+SDK (`@modelcontextprotocol/server`).
 
 ## Requirements
 
-- Node.js 18 or newer (the server uses the global `fetch` and
-  `AbortSignal.timeout`)
+- Node.js 20 or newer (required by the MCP SDK; the server also uses the
+  global `fetch` and `AbortSignal.timeout`)
 - An Intervals.icu API key: **Settings → Developer Settings** on intervals.icu
 
 ## Configuration

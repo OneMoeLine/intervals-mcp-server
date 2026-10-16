@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { IntervalsClient } from "./api.js";
 import {
@@ -63,9 +63,9 @@ server.registerTool(
       'FTP, thresholds and zones (~10 KB), or ["*"] for everything including ' +
       "per-vendor sync configuration. Credential fields are always withheld, " +
       "and email and date of birth are available only on explicit request.",
-    inputSchema: {
+    inputSchema: z.object({
       fields: fieldsParam(ATHLETE_SUMMARY_FIELDS, 162),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ fields }) => {
@@ -83,7 +83,7 @@ server.registerTool(
     title: "Get athlete public profile",
     description:
       "Get public profile info for the athlete (name, bio, location, etc.).",
-    inputSchema: {},
+    inputSchema: z.object({}),
     annotations: READ_ONLY,
   },
   async () =>
@@ -104,7 +104,7 @@ server.registerTool(
     description:
       "List activities for a date range. Returns a compact summary of each activity " +
       "by default; use `fields` to choose exactly what you need.",
-    inputSchema: {
+    inputSchema: z.object({
       oldest: isoDate("Start date in YYYY-MM-DD format (inclusive)"),
       newest: isoDate("End date in YYYY-MM-DD format (inclusive)"),
       limit: z
@@ -115,7 +115,7 @@ server.registerTool(
         .optional()
         .describe("Maximum number of activities to return"),
       fields: fieldsParam(ACTIVITY_SUMMARY_FIELDS, 184),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ oldest, newest, limit, fields }) => {
@@ -136,10 +136,10 @@ server.registerTool(
     description:
       "Get detailed information about a specific activity by its ID. Returns a " +
       "compact summary by default; pass `fields` for other metrics.",
-    inputSchema: {
+    inputSchema: z.object({
       activity_id: z.string().describe("The activity ID"),
       fields: fieldsParam(ACTIVITY_SUMMARY_FIELDS, 184),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ activity_id, fields }) => {
@@ -153,7 +153,7 @@ server.registerTool(
   {
     title: "Search activities",
     description: "Search for activities by name or tag.",
-    inputSchema: {
+    inputSchema: z.object({
       query: z.string().describe("Search query (name or tag)"),
       limit: z
         .number()
@@ -162,7 +162,7 @@ server.registerTool(
         .max(200)
         .optional()
         .describe("Maximum number of results (the API returns 30 by default)"),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ query, limit }) => {
@@ -182,10 +182,10 @@ server.registerTool(
       "Get the lap/interval breakdown for an activity. Each lap carries 84 fields, " +
       "so a compact subset is returned by default; `fields` applies to the " +
       "individual laps inside `icu_intervals` and `icu_groups`.",
-    inputSchema: {
+    inputSchema: z.object({
       activity_id: z.string().describe("The activity ID"),
       fields: fieldsParam(INTERVAL_SUMMARY_FIELDS, 84),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ activity_id, fields }) => {
@@ -210,7 +210,7 @@ server.registerTool(
       `${DEFAULT_STREAM_POINTS} evenly spaced points by default. ` +
       "Pass types to fetch only the channels you need, and raise max_points only when you " +
       "genuinely need finer resolution.",
-    inputSchema: {
+    inputSchema: z.object({
       activity_id: z.string().describe("The activity ID"),
       types: z
         .array(z.string())
@@ -227,7 +227,7 @@ server.registerTool(
         .describe(
           `Downsample each channel to at most this many points (default ${DEFAULT_STREAM_POINTS})`
         ),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ activity_id, types, max_points }) => {
@@ -243,9 +243,9 @@ server.registerTool(
   {
     title: "Get activity power curve",
     description: "Get the mean maximal power curve for a specific activity.",
-    inputSchema: {
+    inputSchema: z.object({
       activity_id: z.string().describe("The activity ID"),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ activity_id }) =>
@@ -259,7 +259,7 @@ server.registerTool(
     description:
       "Find best efforts within an activity - e.g. peak 5-min power, fastest 1km. " +
       "Requires a stream to measure and exactly one of duration or distance.",
-    inputSchema: {
+    inputSchema: z.object({
       activity_id: z.string().describe("The activity ID"),
       stream: z
         .string()
@@ -279,7 +279,7 @@ server.registerTool(
         .positive()
         .optional()
         .describe("Effort length in meters, e.g. 1000 for fastest 1km"),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ activity_id, stream, duration, distance }) => {
@@ -304,9 +304,9 @@ server.registerTool(
   {
     title: "Get activity weather",
     description: "Get the weather summary for an activity.",
-    inputSchema: {
+    inputSchema: z.object({
       activity_id: z.string().describe("The activity ID"),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ activity_id }) =>
@@ -323,7 +323,7 @@ server.registerTool(
       "Get the athlete's best mean maximal power curves across activities of one " +
       "sport. `secs` and `values` on each curve are the curve itself. The bulk " +
       "`activities` lookup map is omitted unless you pass fields [\"*\"].",
-    inputSchema: {
+    inputSchema: z.object({
       type: z
         .string()
         .describe(
@@ -340,7 +340,7 @@ server.registerTool(
             "rejected by the API with the list of valid ones."
         ),
       fields: fieldsParam(POWER_CURVE_SUMMARY_FIELDS, 20),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ type, oldest, newest, curves, fields }) => {
@@ -377,11 +377,11 @@ server.registerTool(
     description:
       "List wellness records for a date range: fitness model (CTL/ATL), HRV, " +
       "resting HR, sleep, weight, mood and the other subjective scores.",
-    inputSchema: {
+    inputSchema: z.object({
       oldest: isoDate("Start date YYYY-MM-DD"),
       newest: isoDate("End date YYYY-MM-DD"),
       fields: fieldsParam(WELLNESS_SUMMARY_FIELDS, 47),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ oldest, newest, fields }) => {
@@ -398,9 +398,9 @@ server.registerTool(
   {
     title: "Get wellness record",
     description: "Get the wellness record for a specific date.",
-    inputSchema: {
+    inputSchema: z.object({
       date: isoDate("Date in YYYY-MM-DD format"),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ date }) =>
@@ -413,7 +413,7 @@ server.registerTool(
     title: "Update wellness record",
     description:
       "Update the wellness record for a specific date. Only supply the fields you want to change.",
-    inputSchema: {
+    inputSchema: z.object({
       date: isoDate("Date in YYYY-MM-DD format"),
       weight: z.number().positive().optional().describe("Body weight in kg"),
       restingHR: z
@@ -441,7 +441,7 @@ server.registerTool(
         .optional()
         .describe("Calories consumed"),
       notes: z.string().optional().describe("Free text notes"),
-    },
+    }),
     // Overwrites fields on the existing record for that date, so destructive;
     // the same call twice leaves the record in the same state, so idempotent.
     annotations: {
@@ -472,11 +472,11 @@ server.registerTool(
       "List events on the athlete's training calendar for a date range. Returns a " +
       "compact summary of each event by default, omitting the structured-workout " +
       "document; pass `fields` to change that.",
-    inputSchema: {
+    inputSchema: z.object({
       oldest: isoDate("Start date YYYY-MM-DD"),
       newest: isoDate("End date YYYY-MM-DD"),
       fields: fieldsParam(EVENT_SUMMARY_FIELDS, 62),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ oldest, newest, fields }) => {
@@ -495,10 +495,10 @@ server.registerTool(
     description:
       "Get a specific calendar event by ID. Returns a compact summary by default - " +
       'pass fields ["*"] (or name workout_doc) to get the structured workout.',
-    inputSchema: {
+    inputSchema: z.object({
       event_id: z.string().describe("The event ID"),
       fields: fieldsParam(EVENT_SUMMARY_FIELDS, 62),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ event_id, fields }) => {
@@ -515,7 +515,7 @@ server.registerTool(
     title: "Create calendar event",
     description:
       "Create an event on the athlete's training calendar (planned workout, race, note, etc.).",
-    inputSchema: {
+    inputSchema: z.object({
       start_date_local: isoDateTime(
         "Start date/time in ISO 8601 format e.g. 2024-06-01T08:00:00"
       ),
@@ -547,7 +547,7 @@ server.registerTool(
         .positive()
         .optional()
         .describe("Planned distance in meters"),
-    },
+    }),
     // Only ever adds, so not destructive - but each call adds another entry,
     // so repeating it is not a no-op.
     annotations: {
@@ -584,7 +584,7 @@ server.registerTool(
   {
     title: "List workouts",
     description: "List all workouts in the athlete's workout library.",
-    inputSchema: {},
+    inputSchema: z.object({}),
     annotations: READ_ONLY,
   },
   async () => json(await client.get(`/athlete/${client.athleteId}/workouts`))
@@ -595,9 +595,9 @@ server.registerTool(
   {
     title: "Get workout",
     description: "Get a specific workout from the library by ID.",
-    inputSchema: {
+    inputSchema: z.object({
       workout_id: z.string().describe("The workout ID"),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ workout_id }) =>
@@ -611,7 +611,7 @@ server.registerTool(
   {
     title: "List gear",
     description: "List all gear (bikes, shoes, etc.) for the athlete.",
-    inputSchema: {},
+    inputSchema: z.object({}),
     annotations: READ_ONLY,
   },
   async () => json(await client.get(`/athlete/${client.athleteId}/gear`))
@@ -624,7 +624,7 @@ server.registerTool(
   {
     title: "List routes",
     description: "List saved routes for the athlete.",
-    inputSchema: {},
+    inputSchema: z.object({}),
     annotations: READ_ONLY,
   },
   async () => json(await client.get(`/athlete/${client.athleteId}/routes`))
@@ -635,9 +635,9 @@ server.registerTool(
   {
     title: "Get route",
     description: "Get a specific route by ID.",
-    inputSchema: {
+    inputSchema: z.object({
       route_id: z.string().describe("The route ID"),
-    },
+    }),
     annotations: READ_ONLY,
   },
   async ({ route_id }) =>
