@@ -1,8 +1,40 @@
 {
   "name": "intervals-mcp-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "MCP server exposing Intervals.icu training data - activities, streams, power curves, wellness and the training calendar - to Claude and other MCP clients.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "intervals.icu",
+    "cycling",
+    "running",
+    "training",
+    "fitness"
+  ],
+  "homepage": "https://github.com/OneMoeLine/intervals-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/OneMoeLine/intervals-mcp-server/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OneMoeLine/intervals-mcp-server.git"
+  },
+  "author": "Travis Moe (https://github.com/OneMoeLine)",
+  "license": "MIT",
+  "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "intervals-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -10,12 +42,9 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "pretest": "tsc",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepare": "tsc"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.3.6"

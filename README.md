@@ -29,12 +29,42 @@ either is missing:
 > them through your MCP client's `env` block (below), or export them in your
 > shell before `npm start`.
 
+### Keeping your key safe
+
+Your API key grants full read and write access to your Intervals.icu account —
+treat it like a password.
+
+- **Never commit it.** `.env` is gitignored; `.env.example` holds placeholders
+  only. Your MCP client's config file lives outside this repository, which is
+  the right place for the real value.
+- **Rotate it** at Settings → Developer Settings if it is ever exposed.
+- The server sends the key only to `intervals.icu`, over HTTPS, as an HTTP
+  Basic `Authorization` header. It is never logged, never written to disk, and
+  never included in an error message.
+- Credential-shaped fields in API responses are stripped before anything is
+  returned to the model — see *Credentials are withheld* below.
+
 ## Install and build
 
 ```bash
-npm install
-npm run build
+git clone https://github.com/OneMoeLine/intervals-mcp-server.git
 ```
+
+Then, from the clone:
+
+```bash
+npm install && npm run build
+```
+
+`npm install` builds automatically via `prepare`, so installing straight from
+the repository also works:
+
+```bash
+npm install -g github:OneMoeLine/intervals-mcp-server
+```
+
+That puts an `intervals-mcp-server` command on your PATH, which you can use in
+place of `node /path/to/dist/index.js` below.
 
 ## Running
 
@@ -154,6 +184,14 @@ it explicitly with `fields: ["sportSettings"]`. On `get_power_curves` the
 omitted unless you pass `["*"]`; `secs` and `values` on each curve are the
 curve.
 
+**Credentials are withheld.** The athlete record carries a slot for the
+account's own API key (`icu_api_key`) and a shareable `icu_friend_invite_token`.
+Both are replaced with a visible marker on every athlete response, including
+when you ask for `fields: ["*"]`, so neither can reach a model's context, a
+transcript or a log. `email` and `icu_date_of_birth` are personal but not
+credentials, so they are merely absent from the default field set and can still
+be requested by name.
+
 **Dates are validated locally.** Date inputs must be `YYYY-MM-DD`
 (`create_event` also accepts `YYYY-MM-DDTHH:MM:SS`). Malformed values fail
 immediately with an actionable message rather than producing a confusing 422
@@ -190,3 +228,12 @@ pretty-printed output roughly doubles token cost for no benefit.
   are unverified.
 - `get_power_curves` takes exactly one sport `type`; the API rejects a
   comma-separated list, so there is no all-sports view.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `npm run typecheck` and
+`npm test` before opening a PR; the suite needs no credentials and no network.
+
+## License
+
+[MIT](LICENSE) © Travis Moe

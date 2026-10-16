@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -9,6 +10,7 @@ import {
   EVENT_SUMMARY_FIELDS,
   INTERVAL_SUMMARY_FIELDS,
   POWER_CURVE_SUMMARY_FIELDS,
+  REDACTED_ATHLETE_FIELDS,
   WELLNESS_SUMMARY_FIELDS,
   downsampleStreams,
   fieldsParam,
@@ -16,6 +18,7 @@ import {
   isoDateTime,
   project,
   projectNested,
+  redact,
   score,
 } from "./transform.js";
 
@@ -50,12 +53,16 @@ server.tool(
   "Get the athlete profile: identity, physiology and account info. Returns a " +
     'compact subset by default - pass fields ["sportSettings"] for per-sport ' +
     'FTP, thresholds and zones (~10 KB), or ["*"] for everything including ' +
-    "per-vendor sync configuration.",
+    "per-vendor sync configuration. Credential fields are always withheld, " +
+    "and email and date of birth are available only on explicit request.",
   {
     fields: fieldsParam(ATHLETE_SUMMARY_FIELDS, 162),
   },
   async ({ fields }) => {
-    const data = await client.get(`/athlete/${client.athleteId}`);
+    const data = redact(
+      await client.get(`/athlete/${client.athleteId}`),
+      REDACTED_ATHLETE_FIELDS
+    );
     return json(project(data, fields ?? ATHLETE_SUMMARY_FIELDS));
   }
 );
@@ -64,7 +71,13 @@ server.tool(
   "get_athlete_profile",
   "Get public profile info for the athlete (name, bio, location, etc.).",
   {},
-  async () => json(await client.get(`/athlete/${client.athleteId}/profile`))
+  async () =>
+    json(
+      redact(
+        await client.get(`/athlete/${client.athleteId}/profile`),
+        REDACTED_ATHLETE_FIELDS
+      )
+    )
 );
 
 // ── Activities ────────────────────────────────────────────────────────────────

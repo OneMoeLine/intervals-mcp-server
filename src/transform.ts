@@ -112,7 +112,6 @@ export const ATHLETE_SUMMARY_FIELDS = [
   "weight",
   "icu_weight",
   "icu_resting_hr",
-  "icu_date_of_birth",
   "height",
   "bio",
   "plan",
@@ -121,6 +120,34 @@ export const ATHLETE_SUMMARY_FIELDS = [
   "training_plan_id",
   "training_availability",
 ];
+
+/** Credential-shaped fields on the athlete record. The payload carries a slot
+ *  for the account's own API key and a friend-invite token, either of which
+ *  would end up in a model's context, a transcript or a log if it were ever
+ *  returned. These are withheld even when the caller asks for everything.
+ *  Note `icu_date_of_birth` and `email` are NOT here: they are personal but
+ *  not credentials, so they are merely absent from the default field set and
+ *  can still be requested explicitly. */
+export const REDACTED_ATHLETE_FIELDS = [
+  "icu_api_key",
+  "icu_friend_invite_token",
+];
+
+export const REDACTION_MARKER = "[redacted by intervals-mcp-server]";
+
+/** Replace credential-shaped fields with a marker. A marker rather than a
+ *  deletion, so it is visible that something was withheld on purpose. */
+export function redact(data: unknown, keys: string[]): unknown {
+  if (!data || typeof data !== "object") return data;
+  if (Array.isArray(data)) return data.map((r) => redact(r, keys));
+  const out: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+  for (const k of keys) {
+    if (k in out && out[k] !== null && out[k] !== undefined) {
+      out[k] = REDACTION_MARKER;
+    }
+  }
+  return out;
+}
 
 /** Wellness records are 47 fields; this keeps the fitness model, the measured
  *  vitals and the subjective scores that `update_wellness` can write. */

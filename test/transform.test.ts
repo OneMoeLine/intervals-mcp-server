@@ -8,6 +8,10 @@ import {
   isoDateTime,
   project,
   projectNested,
+  ATHLETE_SUMMARY_FIELDS,
+  REDACTED_ATHLETE_FIELDS,
+  REDACTION_MARKER,
+  redact,
 } from "../src/transform.js";
 
 /** 0..n-1, so a sampled value doubles as its index in the original. */
@@ -286,6 +290,69 @@ describe("date schemas", () => {
     expect(r.success).toBe(false);
     if (!r.success) {
       expect(r.error.issues[0].message).toMatch(/YYYY-MM-DD/);
+    }
+  });
+});
+
+describe("redact", () => {
+  const athlete = {
+    id: "i1",
+    name: "Someone",
+    icu_api_key: "a-real-secret-key",
+    icu_friend_invite_token: "an-invite-token",
+    email: "someone@example.com",
+  };
+
+  it("replaces credential fields with the marker", () => {
+    const out = redact(athlete, REDACTED_ATHLETE_FIELDS) as Record<string, unknown>;
+    expect(out.icu_api_key).toBe(REDACTION_MARKER);
+    expect(out.icu_friend_invite_token).toBe(REDACTION_MARKER);
+  });
+
+  it("never lets the real secret through", () => {
+    const out = JSON.stringify(redact(athlete, REDACTED_ATHLETE_FIELDS));
+    expect(out).not.toContain("a-real-secret-key");
+    expect(out).not.toContain("an-invite-token");
+  });
+
+  it("leaves every other field untouched", () => {
+    const out = redact(athlete, REDACTED_ATHLETE_FIELDS) as Record<string, unknown>;
+    expect(out.id).toBe("i1");
+    expect(out.name).toBe("Someone");
+    expect(out.email).toBe("someone@example.com");
+  });
+
+  it("does not mutate the input", () => {
+    redact(athlete, REDACTED_ATHLETE_FIELDS);
+    expect(athlete.icu_api_key).toBe("a-real-secret-key");
+  });
+
+  it("leaves an absent or null field alone rather than inventing one", () => {
+    const out = redact({ id: "i1", icu_api_key: null }, REDACTED_ATHLETE_FIELDS) as Record<string, unknown>;
+    expect(out.icu_api_key).toBeNull();
+    expect("icu_friend_invite_token" in out).toBe(false);
+  });
+
+  it("maps over an array of records", () => {
+    const out = redact([athlete, athlete], REDACTED_ATHLETE_FIELDS) as Record<string, unknown>[];
+    expect(out).toHaveLength(2);
+    for (const r of out) expect(r.icu_api_key).toBe(REDACTION_MARKER);
+  });
+
+  it("passes non-objects through unharmed", () => {
+    expect(redact(null, REDACTED_ATHLETE_FIELDS)).toBeNull();
+    expect(redact("text", REDACTED_ATHLETE_FIELDS)).toBe("text");
+  });
+
+  it("survives redaction followed by an explicit fields request", () => {
+    const redacted = redact(athlete, REDACTED_ATHLETE_FIELDS);
+    const out = project(redacted, ["id", "icu_api_key"]) as Record<string, unknown>;
+    expect(out.icu_api_key).toBe(REDACTION_MARKER);
+  });
+
+  it("keeps credentials and personal data out of the default athlete fields", () => {
+    for (const f of [...REDACTED_ATHLETE_FIELDS, "email", "icu_date_of_birth"]) {
+      expect(ATHLETE_SUMMARY_FIELDS).not.toContain(f);
     }
   });
 });
