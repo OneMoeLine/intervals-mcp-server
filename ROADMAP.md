@@ -41,8 +41,23 @@ The first tier is done — 31 tools now, 22 read-only and 9 writers:
   `RACE_A/B/C`, `PLAN`, `INJURED` and the four fitness-chart categories. The
   enum now matches the spec, and a test pins it.
 
-None of it has been exercised against a live account yet — the suite runs
-against a local fake. First real-account run is the obvious next step.
+Exercised against a live account on 2026-10-16. The reads were right first
+time; the writes turned up four things the fake server could not have caught:
+
+- `project()` validated the *default* field set against the keys a response
+  happened to carry, so `get_event` failed outright — the single-event
+  endpoint omits `paired_activity_id`, which the list endpoint returns — and
+  `list_events` failed on any range whose events all lacked it. Defaults are
+  no longer validated; a caller's own field names still are.
+- The workout-syntax resource was wrong in six places, each of which fails
+  silently: the parser drops the line and builds a shorter workout. Rewritten
+  from round-trips against the live parser.
+- `create_event` needs `type` for `SET_EFTP`, not only for the race
+  categories, and `update_event` cannot change `category` once an event is
+  `TARGET` or `PLAN` (422).
+
+`INTERVALS_DELETE_MODE=full` is still fake-server-only on purpose: verifying it
+live means deleting real history.
 
 ## Tier 1 — next up
 

@@ -23,7 +23,9 @@ import {
   isoDate,
   isoDateTime,
   project,
+  projectFields,
   projectNested,
+  projectNestedFields,
   redact,
   score,
 } from "./transform.js";
@@ -143,7 +145,7 @@ server.registerTool(
       await client.get(`/athlete/${client.athleteId}`),
       REDACTED_ATHLETE_FIELDS
     );
-    return json(project(data, fields ?? ATHLETE_SUMMARY_FIELDS));
+    return json(projectFields(data, fields, ATHLETE_SUMMARY_FIELDS));
   }
 );
 
@@ -195,7 +197,7 @@ server.registerTool(
       `/athlete/${client.athleteId}/activities`,
       params
     );
-    return json(project(data, fields ?? ACTIVITY_SUMMARY_FIELDS));
+    return json(projectFields(data, fields, ACTIVITY_SUMMARY_FIELDS));
   }
 );
 
@@ -214,7 +216,7 @@ server.registerTool(
   },
   async ({ activity_id, fields }) => {
     const data = await client.get(`/activity/${activity_id}`);
-    return json(project(data, fields ?? ACTIVITY_SUMMARY_FIELDS));
+    return json(projectFields(data, fields, ACTIVITY_SUMMARY_FIELDS));
   }
 );
 
@@ -261,10 +263,11 @@ server.registerTool(
   async ({ activity_id, fields }) => {
     const data = await client.get(`/activity/${activity_id}/intervals`);
     return json(
-      projectNested(
+      projectNestedFields(
         data,
         ["icu_intervals", "icu_groups"],
-        fields ?? INTERVAL_SUMMARY_FIELDS
+        fields,
+        INTERVAL_SUMMARY_FIELDS
       )
     );
   }
@@ -476,10 +479,11 @@ server.registerTool(
     );
     if (fields?.includes("*")) return json(data);
 
-    const trimmed = projectNested(
+    const trimmed = projectNestedFields(
       data,
       ["list"],
-      fields ?? POWER_CURVE_SUMMARY_FIELDS
+      fields,
+      POWER_CURVE_SUMMARY_FIELDS
     );
     // `activities` is a lookup map roughly as large as the curves themselves.
     if (trimmed && typeof trimmed === "object" && !Array.isArray(trimmed)) {
@@ -511,7 +515,7 @@ server.registerTool(
       oldest,
       newest,
     });
-    return json(project(data, fields ?? WELLNESS_SUMMARY_FIELDS));
+    return json(projectFields(data, fields, WELLNESS_SUMMARY_FIELDS));
   }
 );
 
@@ -601,7 +605,9 @@ server.registerTool(
       oldest,
       newest,
     });
-    return json(fitnessSeries(project(data, FITNESS_FIELDS), localToday()));
+    return json(
+      fitnessSeries(project(data, FITNESS_FIELDS, false), localToday())
+    );
   }
 );
 
@@ -627,7 +633,7 @@ server.registerTool(
       oldest,
       newest,
     });
-    return json(project(data, fields ?? EVENT_SUMMARY_FIELDS));
+    return json(projectFields(data, fields, EVENT_SUMMARY_FIELDS));
   }
 );
 
@@ -648,7 +654,7 @@ server.registerTool(
     const data = await client.get(
       `/athlete/${client.athleteId}/events/${event_id}`
     );
-    return json(project(data, fields ?? EVENT_SUMMARY_FIELDS));
+    return json(projectFields(data, fields, EVENT_SUMMARY_FIELDS));
   }
 );
 
@@ -681,8 +687,9 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "Sport type, validated strictly by the API and required for races " +
-            "e.g. Ride, VirtualRide, Run, Swim, WeightTraining"
+          "Sport type, validated strictly by the API e.g. Ride, VirtualRide, " +
+            "Run, Swim, WeightTraining. Required for the RACE categories and " +
+            "for SET_EFTP, which sets the eFTP of one sport."
         ),
       end_date_local: isoDateTime(
         "End date/time for a ranged event - PLAN, HOLIDAY, SICK, INJURED"
@@ -725,6 +732,9 @@ server.registerTool(
       "Change an existing calendar event. Only supply what should change - " +
       "omitted fields are left alone. Rewriting `description` on a WORKOUT " +
       "replaces its steps, so send the whole workout, not a fragment. " +
+      "`category` is one-way for some kinds: once an event is TARGET or PLAN " +
+      "the API refuses to change it again (422), so delete and recreate " +
+      "instead. " +
       EVENT_CATEGORY_HELP,
     inputSchema: z.object({
       event_id: z.number().int().describe("The event ID"),
@@ -989,7 +999,7 @@ server.registerTool(
   },
   async ({ fields }) => {
     const data = await client.get(`/athlete/${client.athleteId}/folders`);
-    return json(project(data, fields ?? FOLDER_SUMMARY_FIELDS));
+    return json(projectFields(data, fields, FOLDER_SUMMARY_FIELDS));
   }
 );
 

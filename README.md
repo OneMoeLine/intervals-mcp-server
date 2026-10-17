@@ -268,12 +268,18 @@ the split, so a new tool cannot be added without a hint.
 - Athlete zones are only reachable through `get_athlete` with
   `fields: ["sportSettings"]`, and cannot be changed from here — there is no
   sport-settings write, so FTP and threshold updates still mean the website.
-- The write tools added for calendar and library work — `update_activity`,
-  `update_event`, `delete_event`, `create_workout`, `update_workout`,
-  `delete_workout`, `list_folders`, `create_folder` — and
-  `get_fitness_chart` are built against the Intervals.icu OpenAPI spec and
-  tested against the fake server, but have not been exercised against a live
-  account.
+- `update_activity`, `update_event`, `delete_event`, `create_workout`,
+  `update_workout`, `delete_workout`, `list_folders`, `get_fitness_chart` and
+  the workout-syntax resource were exercised against a live Intervals.icu
+  account on 2026-10-16 and behave as documented. Still unverified there:
+  `create_folder` (the account had a folder already, so none was created), and
+  `INTERVALS_DELETE_MODE=full`, which is covered only by the fake-server test —
+  running it against a real account risks real history for no new information.
+- Changing `category` on an existing event is one-way for some kinds: once an
+  event is `TARGET` or `PLAN`, the API answers 422 "Cannot change category"
+  and the only route is delete-and-recreate. `SET_EFTP` additionally requires
+  `type`, since eFTP is per sport. All fourteen categories in the enum were
+  accepted by the live API.
 - `get_fitness_chart` reports future days as `projected` by comparing dates
   against the host's local date, which is the athlete's own day only when the
   server runs on their machine — the stdio case, but not a remote one.
@@ -282,15 +288,25 @@ the split, so a new tool cannot be added without a hint.
 - The test suite never contacts Intervals.icu, so it pins down this server's
   behaviour rather than the upstream API's. A change in what Intervals.icu
   actually returns would not be caught by it.
-- Of the 31 tools, twelve are driven end to end against the fake API
+- Of the 31 tools, fourteen are driven end to end against the fake API
   (`list_activities`, `get_activity_streams`, `get_power_curves`,
-  `update_wellness`, `create_event`, `update_event`, `delete_event`,
-  `update_activity`, `create_workout`, `delete_workout`, `list_folders`,
-  `get_fitness_chart`) and two more are exercised on their error paths. The
-  remaining seventeen are covered only at the schema level, by `tools/list`.
-- `list_workouts`, `list_gear` and `list_routes` return zero records for the
-  configured athlete, so they have never been exercised against real data and
-  are unverified.
+  `update_wellness`, `list_events`, `get_event`, `create_event`,
+  `update_event`, `delete_event`, `update_activity`, `create_workout`,
+  `delete_workout`, `list_folders`, `get_fitness_chart`) and two more are
+  exercised on their error paths. The remaining fifteen are covered only at the
+  schema level, by `tools/list`.
+- `list_gear` and `list_routes` return zero records for the configured
+  athlete, so they have never been exercised against real data and are
+  unverified. (`list_workouts` has since been exercised live, against a
+  workout created and then deleted by the verification run.)
+- The `intervals-icu://workout-syntax` resource was rewritten from what the
+  live parser does, not from the forum documentation, after round-tripping
+  each rule through a real event. Six of its claims were wrong: the dashed
+  `- 3x` repeat form (never parses), a blank line after the `Nx` marker
+  (kills the repeat), clock step lengths `5:00` and `1:30:00` (dropped),
+  `lap press` as a manual step (becomes prompt text), and absolute bpm
+  targets in every spelling (dropped). An unparseable line is dropped on its
+  own, silently, so a wrong rule shortens the workout rather than failing it.
 - `get_power_curves` takes exactly one sport `type`; the API rejects a
   comma-separated list, so there is no all-sports view.
 

@@ -584,6 +584,69 @@ describe("write tools against the fake API", () => {
   });
 });
 
+describe("sparse API payloads", () => {
+  /** The live API omits keys per record rather than nulling them: a single
+   *  event carries no `paired_activity_id` where the list of events does, and
+   *  an event with no sport carries no `type`. The default summary set names
+   *  those fields, so validating it would fail a read the caller did not get
+   *  wrong - which is exactly what happened against the real API. */
+  const sparseEvent = {
+    id: 42,
+    name: "Rest day",
+    category: "NOTE",
+    start_date_local: "2024-06-01T00:00:00",
+    description: "easy",
+  };
+
+  it("reads an event whose payload omits most of the summary set", async () => {
+    fake.replyWith({ body: sparseEvent });
+    const res = await server.request("tools/call", {
+      name: "get_event",
+      arguments: { event_id: "42" },
+    });
+
+    expect(res.result.isError).toBeFalsy();
+    const payload = JSON.parse(res.result.content[0].text);
+    expect(payload).toEqual(sparseEvent);
+  });
+
+  it("lists events whose payloads omit most of the summary set", async () => {
+    fake.replyWith({ body: [sparseEvent] });
+    const res = await server.request("tools/call", {
+      name: "list_events",
+      arguments: { oldest: "2024-06-01", newest: "2024-06-30" },
+    });
+
+    expect(res.result.isError).toBeFalsy();
+    expect(JSON.parse(res.result.content[0].text)).toEqual([sparseEvent]);
+  });
+
+  it("builds the fitness chart from records missing the load fields", async () => {
+    fake.replyWith({ body: [{ id: "2024-06-01", ctl: 50, atl: 40 }] });
+    const res = await server.request("tools/call", {
+      name: "get_fitness_chart",
+      arguments: { oldest: "2024-06-01", newest: "2024-06-01" },
+    });
+
+    expect(res.result.isError).toBeFalsy();
+    const payload = JSON.parse(res.result.content[0].text);
+    expect(payload.series).toEqual([
+      { date: "2024-06-01", ctl: 50, atl: 40, form: 10 },
+    ]);
+  });
+
+  it("still reports a typo in a caller-supplied field name", async () => {
+    fake.replyWith({ body: sparseEvent });
+    const res = await server.request("tools/call", {
+      name: "get_event",
+      arguments: { event_id: "42", fields: ["nmae"] },
+    });
+
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain("Unknown field(s): nmae");
+  });
+});
+
 describe("get_fitness_chart", () => {
   /** The API returns a fixed key set per wellness record, nulls included. */
   const record = (
@@ -730,8 +793,14 @@ describe("resources", () => {
     });
     const text = res.result.contents[0].text as string;
     expect(res.result.contents[0].uri).toBe("intervals-icu://workout-syntax");
-    // The two mistakes that produce a wrong workout with no error:
+    // The mistakes that produce a wrong workout with no error, each one
+    // confirmed against the live parser:
     expect(text).toMatch(/is 400 minutes, not 400 metres/);
     expect(text).toMatch(/required on every pace target/);
+    expect(text).toMatch(/with a dash is never a repeat/);
+    expect(text).toMatch(/Absolute heart rate in bpm is NOT parsed/);
+    expect(text).toMatch(/Clock formats are NOT parsed/);
+    // The examples must not use the dashed repeat form the text warns about.
+    expect(text).not.toMatch(/^ +- d+x$/m);
   });
 });

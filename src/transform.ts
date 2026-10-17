@@ -230,11 +230,21 @@ export function pickFields(record: unknown, fields: string[]): unknown {
   return out;
 }
 
-/** Project each record down to `fields`, preserving the array/object shape. */
-export function project(data: unknown, fields: string[]): unknown {
+/** Project each record down to `fields`, preserving the array/object shape.
+ *
+ *  `validate` guards caller-supplied names only. A summary set is this
+ *  server’s own list and must never fail a call: the API omits keys per
+ *  record rather than nulling them - a single event carries no
+ *  `paired_activity_id` where the list of events does - so validating a
+ *  default turns a perfectly good read into an error. */
+export function project(
+  data: unknown,
+  fields: string[],
+  validate = true
+): unknown {
   if (fields.includes("*")) return data;
   const records = Array.isArray(data) ? data : [data];
-  assertKnownFields(fields, knownKeys(records));
+  if (validate) assertKnownFields(fields, knownKeys(records));
   return Array.isArray(data)
     ? data.map((r) => pickFields(r, fields))
     : pickFields(data, fields);
@@ -245,10 +255,34 @@ export function project(data: unknown, fields: string[]): unknown {
  *  object, as with an activity's interval breakdown. Field names are validated
  *  against the union of all targeted arrays so a name valid in one of them is
  *  not rejected because of another. */
+/** The `fields` contract every trimming tool shares: the caller’s names when
+ *  they passed any, else the tool’s summary set. Only the caller’s names are
+ *  checked for typos - see `project`. */
+export function projectFields(
+  data: unknown,
+  fields: string[] | undefined,
+  summary: string[]
+): unknown {
+  return fields ? project(data, fields) : project(data, summary, false);
+}
+
+/** `projectFields` for records nested under `keys`. */
+export function projectNestedFields(
+  data: unknown,
+  keys: string[],
+  fields: string[] | undefined,
+  summary: string[]
+): unknown {
+  return fields
+    ? projectNested(data, keys, fields)
+    : projectNested(data, keys, summary, false);
+}
+
 export function projectNested(
   data: unknown,
   keys: string[],
-  fields: string[]
+  fields: string[],
+  validate = true
 ): unknown {
   if (fields.includes("*")) return data;
   if (!data || typeof data !== "object" || Array.isArray(data)) return data;
@@ -256,8 +290,9 @@ export function projectNested(
   const targets = keys.filter((k) => Array.isArray(src[k]));
   if (targets.length === 0) return data;
 
-  const all = targets.flatMap((k) => src[k] as unknown[]);
-  assertKnownFields(fields, knownKeys(all));
+  if (validate) {
+    assertKnownFields(fields, knownKeys(targets.flatMap((k) => src[k] as unknown[])));
+  }
 
   const out: Record<string, unknown> = { ...src };
   for (const k of targets) {
