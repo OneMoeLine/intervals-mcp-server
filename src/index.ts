@@ -12,7 +12,9 @@ import {
   EVENT_SUMMARY_FIELDS,
   FITNESS_FIELDS,
   FOLDER_SUMMARY_FIELDS,
+  HR_CURVE_SUMMARY_FIELDS,
   INTERVAL_SUMMARY_FIELDS,
+  PACE_CURVE_SUMMARY_FIELDS,
   POWER_CURVE_SUMMARY_FIELDS,
   REDACTED_ATHLETE_FIELDS,
   WELLNESS_SUMMARY_FIELDS,
@@ -440,59 +442,126 @@ server.registerTool(
 
 // ── Power & Performance ───────────────────────────────────────────────────────
 
-server.registerTool(
-  "get_power_curves",
-  {
-    title: "Get power curves",
-    description:
-      "Get the athlete's best mean maximal power curves across activities of one " +
-      "sport. `secs` and `values` on each curve are the curve itself. The bulk " +
-      "`activities` lookup map is omitted unless you pass fields [\"*\"].",
-    inputSchema: z.object({
-      type: z
-        .string()
-        .describe(
-          "Sport type - REQUIRED, and exactly one (the API rejects a comma-separated " +
-            "list). e.g. Ride, VirtualRide, GravelRide, Run, VirtualRun, Swim"
-        ),
-      oldest: isoDate("Start date YYYY-MM-DD").optional(),
-      newest: isoDate("End date YYYY-MM-DD").optional(),
-      curves: z
-        .string()
-        .optional()
-        .describe(
-          'Which curves to return, e.g. "42d" or "all". Invalid values are ' +
-            "rejected by the API with the list of valid ones."
-        ),
-      fields: fieldsParam(POWER_CURVE_SUMMARY_FIELDS, 20),
-    }),
-    annotations: READ_ONLY,
-  },
-  async ({ type, oldest, newest, curves, fields }) => {
-    const params: Record<string, string> = { type };
-    if (oldest) params.oldest = oldest;
-    if (newest) params.newest = newest;
-    if (curves) params.curves = curves;
-    const data = await client.get(
-      `/athlete/${client.athleteId}/power-curves`,
-      params
-    );
-    if (fields?.includes("*")) return json(data);
+/** Power, HR and pace curves are one endpoint family: same request shape, same
+ *  wrapper back - a `list` of curves plus an `activities` lookup map roughly as
+ *  large as the curves themselves. Only the path, the summary set and pace's
+ *  grade-adjustment flag differ, so all three tools register through here. */
+function registerCurveTool({
+  name,
+  title,
+  description,
+  path,
+  summary,
+  total,
+  extra,
+}: {
+  name: string;
+  title: string;
+  description: string;
+  path: string;
+  summary: string[];
+  /** Field count of the untrimmed record, for the `fields` description. */
+  total: number;
+  /** Query parameters only this endpoint takes, slotted in before `fields`. */
+  extra?: z.ZodRawShape;
+}) {
+  server.registerTool(
+    name,
+    {
+      title,
+      description,
+      inputSchema: z.object({
+        type: z
+          .string()
+          .describe(
+            "Sport type - REQUIRED, and exactly one (the API rejects a comma-separated " +
+              "list). e.g. Ride, VirtualRide, GravelRide, Run, VirtualRun, Swim"
+          ),
+        oldest: isoDate("Start date YYYY-MM-DD").optional(),
+        newest: isoDate("End date YYYY-MM-DD").optional(),
+        curves: z
+          .string()
+          .optional()
+          .describe(
+            'Which curves to return, e.g. "42d" or "all". Invalid values are ' +
+              "rejected by the API with the list of valid ones."
+          ),
+        ...extra,
+        fields: fieldsParam(summary, total),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ fields, ...rest }) => {
+      // Everything that is not `fields` is a query parameter; a boolean goes
+      // over the wire as "true"/"false".
+      const params: Record<string, string> = Object.fromEntries(
+        Object.entries(compactBody(rest)).map(([k, v]) => [k, String(v)])
+      );
+      const data = await client.get(
+        `/athlete/${client.athleteId}${path}`,
+        params
+      );
+      if (fields?.includes("*")) return json(data);
 
-    const trimmed = projectNestedFields(
-      data,
-      ["list"],
-      fields,
-      POWER_CURVE_SUMMARY_FIELDS
-    );
-    // `activities` is a lookup map roughly as large as the curves themselves.
-    if (trimmed && typeof trimmed === "object" && !Array.isArray(trimmed)) {
-      const { activities, ...rest } = trimmed as Record<string, unknown>;
-      return json(rest);
+      const trimmed = projectNestedFields(data, ["list"], fields, summary);
+      // `activities` is a lookup map roughly as large as the curves themselves.
+      if (trimmed && typeof trimmed === "object" && !Array.isArray(trimmed)) {
+        const { activities, ...kept } = trimmed as Record<string, unknown>;
+        return json(kept);
+      }
+      return json(trimmed);
     }
-    return json(trimmed);
-  }
-);
+  );
+}
+
+registerCurveTool({
+  name: "get_power_curves",
+  title: "Get power curves",
+  description:
+    "Get the athlete's best mean maximal power curves across activities of one " +
+    "sport. `secs` and `values` on each curve are the curve itself. The bulk " +
+    "`activities` lookup map is omitted unless you pass fields [\"*\"].",
+  path: "/power-curves",
+  summary: POWER_CURVE_SUMMARY_FIELDS,
+  total: 20,
+});
+
+registerCurveTool({
+  name: "get_hr_curves",
+  title: "Get HR curves",
+  description:
+    "Get the athlete's best mean maximal heart rate curves across activities of " +
+    "one sport - the highest average HR held for each duration. `secs` and " +
+    "`values` on each curve are the curve itself. The bulk `activities` lookup " +
+    "map is omitted unless you pass fields [\"*\"].",
+  path: "/hr-curves",
+  summary: HR_CURVE_SUMMARY_FIELDS,
+  total: 18,
+});
+
+registerCurveTool({
+  name: "get_pace_curves",
+  title: "Get pace curves",
+  description:
+    "Get the athlete's best pace curves across activities of one sport. Unlike " +
+    "the power and HR curves these are indexed by distance, not duration: " +
+    "`distance` (metres) against `values` (seconds taken) is the curve itself. " +
+    "Pass gap: true for grade adjusted pace. The bulk `activities` lookup map " +
+    "is omitted unless you pass fields [\"*\"].",
+  path: "/pace-curves",
+  summary: PACE_CURVE_SUMMARY_FIELDS,
+  total: 20,
+  extra: {
+    gap: z
+      .boolean()
+      .optional()
+      .describe(
+        "Return grade adjusted pace (GAP) curves, which correct for climbing " +
+          'and descending. Each curve\'s `type` reports which it is - "PACE" ' +
+          'or "GAP" - so the answer says so rather than having to be trusted.'
+      ),
+  },
+});
 
 // ── Wellness ──────────────────────────────────────────────────────────────────
 

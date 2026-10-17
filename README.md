@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that exposes your
 [Intervals.icu](https://intervals.icu) training data — activities, power curves,
 wellness, calendar, workouts, gear and routes — to an MCP client such as Claude.
 
-Communicates over stdio. 31 tools — 22 read-only and 9 that write — plus one
+Communicates over stdio. 33 tools — 24 read-only and 9 that write — plus one
 resource, the Intervals.icu workout syntax reference. Built on v2 of the MCP
 TypeScript SDK (`@modelcontextprotocol/server`).
 
@@ -121,7 +121,7 @@ Three layers:
   schedule and its cap, per-attempt timeouts and error-body truncation. The
   backoff is injected as zero, so the retry tests do not sleep.
 - **`test/mcp.test.ts`** — the real server binary over stdio: `initialize`, then
-  `tools/list` asserting all 31 tools and their input schemas, plus `tools/call`
+  `tools/list` asserting all 33 tools and their input schemas, plus `tools/call`
   for the handler rules (the either/or on `get_activity_best_efforts`, date
   rejection before any HTTP call) and a handful of end-to-end calls against the
   fake API.
@@ -135,7 +135,8 @@ Three layers:
 `get_activity_best_efforts`, `get_activity_weather`, `update_activity`
 *(writes)*
 
-**Power** — `get_power_curves`
+**Power, HR and pace** — `get_power_curves`, `get_hr_curves`,
+`get_pace_curves`
 
 **Wellness and fitness** — `list_wellness`, `get_wellness`,
 `update_wellness` *(writes)*, `get_fitness_chart`
@@ -180,6 +181,8 @@ parameter. Measured against real data:
 | `get_activity`, one activity | 0.9 KB | 4.8 KB | 82% |
 | `get_activity_intervals`, 12 laps | 7.4 KB | 29.0 KB | 74% |
 | `get_power_curves`, type=Ride | 5.4 KB | 17.9 KB | 70% |
+| `get_hr_curves`, type=Run | 3.3 KB | 10.8 KB | 69% |
+| `get_pace_curves`, type=Run | 2.6 KB | 10.6 KB | 75% |
 | `list_wellness`, 15 days | 5.4 KB | 12.9 KB | 58% |
 
 Pass `fields` to choose exactly what you want — `fields: ["id","name",
@@ -193,10 +196,10 @@ Three cases are worth knowing. On `get_activity_intervals` the bulk is the
 nested per-lap list, so `fields` applies to the laps inside `icu_intervals` and
 `icu_groups` rather than to the wrapper. On `get_athlete`, `sportSettings`
 holds per-sport FTP, thresholds and zones and is 10.2 KB on its own — ask for
-it explicitly with `fields: ["sportSettings"]`. On `get_power_curves` the
+it explicitly with `fields: ["sportSettings"]`. On the three curve tools the
 `activities` lookup map is roughly as large as the curves themselves and is
-omitted unless you pass `["*"]`; `secs` and `values` on each curve are the
-curve.
+omitted unless you pass `["*"]`; `secs` and `values` on each power or HR
+curve are the curve, and `distance` against `values` on a pace curve.
 
 **Credentials are withheld.** The athlete record carries a slot for the
 account's own API key (`icu_api_key`) and a shareable `icu_friend_invite_token`.
@@ -247,7 +250,7 @@ because a model can set an argument itself:
 template and carries no training history of its own. Deleting one leaves
 calendar events already created from it untouched.
 
-**Reads and writes are labelled.** 22 of the 31 tools only read, and are
+**Reads and writes are labelled.** 24 of the 33 tools only read, and are
 annotated `readOnlyHint: true` so a client can auto-approve them. The nine
 writers come in three shapes. The updates — `update_activity`,
 `update_wellness`, `update_event`, `update_workout` — overwrite fields on an
@@ -288,8 +291,9 @@ the split, so a new tool cannot be added without a hint.
 - The test suite never contacts Intervals.icu, so it pins down this server's
   behaviour rather than the upstream API's. A change in what Intervals.icu
   actually returns would not be caught by it.
-- Of the 31 tools, fourteen are driven end to end against the fake API
+- Of the 33 tools, sixteen are driven end to end against the fake API
   (`list_activities`, `get_activity_streams`, `get_power_curves`,
+  `get_hr_curves`, `get_pace_curves`,
   `update_wellness`, `list_events`, `get_event`, `create_event`,
   `update_event`, `delete_event`, `update_activity`, `create_workout`,
   `delete_workout`, `list_folders`, `get_fitness_chart`) and two more are
@@ -307,7 +311,7 @@ the split, so a new tool cannot be added without a hint.
   `lap press` as a manual step (becomes prompt text), and absolute bpm
   targets in every spelling (dropped). An unparseable line is dropped on its
   own, silently, so a wrong rule shortens the workout rather than failing it.
-- `get_power_curves` takes exactly one sport `type`; the API rejects a
+- The curve tools take exactly one sport `type`; the API rejects a
   comma-separated list, so there is no all-sports view.
 
 ## Contributing

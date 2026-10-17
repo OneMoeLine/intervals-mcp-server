@@ -17,6 +17,8 @@ const EXPECTED_TOOLS = [
   "get_activity_weather",
   "update_activity",
   "get_power_curves",
+  "get_hr_curves",
+  "get_pace_curves",
   "list_wellness",
   "get_wellness",
   "update_wellness",
@@ -98,8 +100,8 @@ describe("startup", () => {
 });
 
 describe("tools/list", () => {
-  it("exposes all 31 tools", () => {
-    expect(tools).toHaveLength(31);
+  it("exposes all 33 tools", () => {
+    expect(tools).toHaveLength(33);
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());
   });
 
@@ -209,7 +211,7 @@ describe("tools/list", () => {
     });
   });
 
-  it("offers a fields parameter on each of the nine trimming tools", () => {
+  it("offers a fields parameter on each of the eleven trimming tools", () => {
     const withFields = tools
       .filter((t) => "fields" in t.inputSchema.properties)
       .map((t) => t.name)
@@ -219,6 +221,8 @@ describe("tools/list", () => {
       "get_activity_intervals",
       "get_athlete",
       "get_event",
+      "get_hr_curves",
+      "get_pace_curves",
       "get_power_curves",
       "list_activities",
       "list_events",
@@ -429,6 +433,100 @@ describe("tools/call against the fake API", () => {
       arguments: { type: "Ride", fields: ["*"] },
     });
     expect(JSON.parse(res.result.content[0].text)).toEqual(body);
+  });
+
+  it("trims an hr curve to the summary fields by default", async () => {
+    fake.replyWith({
+      body: {
+        list: [
+          {
+            id: "42d",
+            label: "42 days",
+            days: 43,
+            secs: [1, 2, 3],
+            values: [188, 188, 187],
+            activity_id: ["a1", "a1", "a2"],
+            start_index: [0, 0, 11],
+            end_index: [1, 2, 14],
+            submax_values: [[180]],
+            weight: 67.1,
+          },
+        ],
+        activities: { a1: "Morning Run", a2: "Hill repeats" },
+      },
+    });
+    const res = await server.request("tools/call", {
+      name: "get_hr_curves",
+      arguments: { type: "Run", curves: "42d" },
+    });
+
+    const sent = fake.requests[fake.requests.length - 1];
+    expect(sent.path).toBe("/athlete/i1/hr-curves");
+    expect(sent.query).toEqual({ type: "Run", curves: "42d" });
+    const payload = JSON.parse(res.result.content[0].text);
+    expect(payload).not.toHaveProperty("activities");
+    // The curve and its provenance survive; the per-point index tables and the
+    // submax matrix, which dwarf them, do not.
+    expect(Object.keys(payload.list[0]).sort()).toEqual([
+      "activity_id",
+      "days",
+      "id",
+      "label",
+      "secs",
+      "values",
+    ]);
+  });
+
+  it("asks for grade adjusted pace only when told to", async () => {
+    const paceBody = (type: string) => ({
+      list: [
+        {
+          id: "42d",
+          label: "42 days",
+          type,
+          days: 43,
+          distance: [100, 200],
+          values: [15, 32],
+          paceModels: [{ type: "CS", criticalSpeed: 4.48, dPrime: 28.4 }],
+          start_index: [0, 0],
+          submax_values: [[16]],
+        },
+      ],
+      activities: { a1: "Morning Run" },
+    });
+
+    fake.replyWith({ body: paceBody("PACE") });
+    const plain = await server.request("tools/call", {
+      name: "get_pace_curves",
+      arguments: { type: "Run" },
+    });
+    expect(fake.requests[fake.requests.length - 1].query).toEqual({
+      type: "Run",
+    });
+
+    fake.replyWith({ body: paceBody("GAP") });
+    const adjusted = await server.request("tools/call", {
+      name: "get_pace_curves",
+      arguments: { type: "Run", gap: true },
+    });
+    const sent = fake.requests[fake.requests.length - 1];
+    expect(sent.path).toBe("/athlete/i1/pace-curves");
+    expect(sent.query).toEqual({ type: "Run", gap: "true" });
+
+    // Pace curves run against distance, not duration, and `type` is in the
+    // default field set so a GAP answer identifies itself.
+    const curveOf = (res: any) =>
+      JSON.parse(res.result.content[0].text).list[0];
+    expect(curveOf(plain)).toEqual({
+      id: "42d",
+      label: "42 days",
+      type: "PACE",
+      days: 43,
+      distance: [100, 200],
+      values: [15, 32],
+      paceModels: [{ type: "CS", criticalSpeed: 4.48, dPrime: 28.4 }],
+    });
+    expect(curveOf(adjusted).type).toBe("GAP");
   });
 
   it("surfaces an upstream error as an error result", async () => {

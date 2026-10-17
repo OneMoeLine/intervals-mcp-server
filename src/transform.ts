@@ -195,6 +195,41 @@ export const POWER_CURVE_SUMMARY_FIELDS = [
   "vo2max_5m",
 ];
 
+/** HR curves are the same shape as power curves without the models, ranks and
+ *  map plot; `secs` and `values` are the curve and the rest is provenance. */
+export const HR_CURVE_SUMMARY_FIELDS = [
+  "id",
+  "label",
+  "start_date_local",
+  "end_date_local",
+  "days",
+  "secs",
+  "values",
+  "moving_time",
+  "training_load",
+  "activity_id",
+];
+
+/** Pace curves are indexed by distance rather than duration: `distance`
+ *  (metres) against `values` (seconds taken). `type` earns its place in the
+ *  default - it reads PACE or GAP, so a grade-adjusted response says so
+ *  instead of looking like a plain one. `paceModels` is a couple of numbers
+ *  (critical speed and D') rather than a table. */
+export const PACE_CURVE_SUMMARY_FIELDS = [
+  "id",
+  "label",
+  "type",
+  "start_date_local",
+  "end_date_local",
+  "days",
+  "distance",
+  "values",
+  "moving_time",
+  "training_load",
+  "activity_id",
+  "paceModels",
+];
+
 /** Keys present across a set of records. The API returns a fixed key set, with
  *  nulls for metrics that do not apply, so this is the authoritative list. */
 export function knownKeys(records: unknown[]): Set<string> {
