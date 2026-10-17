@@ -233,7 +233,7 @@ export function pickFields(record: unknown, fields: string[]): unknown {
 /** Project each record down to `fields`, preserving the array/object shape.
  *
  *  `validate` guards caller-supplied names only. A summary set is this
- *  server’s own list and must never fail a call: the API omits keys per
+ *  server's own list and must never fail a call: the API omits keys per
  *  record rather than nulling them - a single event carries no
  *  `paired_activity_id` where the list of events does - so validating a
  *  default turns a perfectly good read into an error. */
@@ -250,13 +250,8 @@ export function project(
     : pickFields(data, fields);
 }
 
-/** Project the records inside named array fields, leaving the wrapper intact.
- *  Used where the bulk of a response is a nested list rather than the top-level
- *  object, as with an activity's interval breakdown. Field names are validated
- *  against the union of all targeted arrays so a name valid in one of them is
- *  not rejected because of another. */
-/** The `fields` contract every trimming tool shares: the caller’s names when
- *  they passed any, else the tool’s summary set. Only the caller’s names are
+/** The `fields` contract every trimming tool shares: the caller's names when
+ *  they passed any, else the tool's summary set. Only the caller's names are
  *  checked for typos - see `project`. */
 export function projectFields(
   data: unknown,
@@ -278,6 +273,12 @@ export function projectNestedFields(
     : projectNested(data, keys, summary, false);
 }
 
+/** Project the records inside named array fields, leaving the wrapper intact.
+ *  Used where the bulk of a response is a nested list rather than the top-level
+ *  object, as with an activity's interval breakdown. Field names are validated
+ *  against the union of all targeted arrays so a name valid in one of them is
+ *  not rejected because of another, and only when `validate` is set - see
+ *  `project` for why a default field set is exempt. */
 export function projectNested(
   data: unknown,
   keys: string[],
