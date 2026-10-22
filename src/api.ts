@@ -59,7 +59,7 @@ export class IntervalsClient {
     options: IntervalsClientOptions = {}
   ) {
     this.authHeader =
-      "Basic " + Buffer.from(`API_KEY:${apiKey}`).toString("base64");
+      "Basic " + btoa(`API_KEY:${apiKey}`);
     this.athleteId = athleteId;
     this.baseUrl =
       options.baseUrl ?? process.env.INTERVALS_BASE_URL ?? DEFAULT_BASE_URL;

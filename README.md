@@ -4,7 +4,8 @@ An [MCP](https://modelcontextprotocol.io) server that exposes your
 [Intervals.icu](https://intervals.icu) training data — activities, power curves,
 wellness, calendar, workouts, gear and routes — to an MCP client such as Claude.
 
-Communicates over stdio. 33 tools — 24 read-only and 9 that write — plus one
+Runs locally over stdio, or as a hosted multi-user server on Cloudflare Workers
+(see [Hosting it for others](#hosting-it-for-others)). 33 tools — 24 read-only and 9 that write — plus one
 resource, the Intervals.icu workout syntax reference. Built on v2 of the MCP
 TypeScript SDK (`@modelcontextprotocol/server`).
 
@@ -17,7 +18,7 @@ TypeScript SDK (`@modelcontextprotocol/server`).
 ## Configuration
 
 The server reads two required environment variables and exits with a clear
-message if either is missing, plus two optional ones:
+message if either is missing, plus three optional ones:
 
 | Variable | Description |
 | --- | --- |
@@ -25,6 +26,7 @@ message if either is missing, plus two optional ones:
 | `INTERVALS_ATHLETE_ID` | Your athlete ID, e.g. `i12345` |
 | `INTERVALS_BASE_URL` | *Optional.* API root, for pointing the client at a local fake server. Defaults to `https://intervals.icu/api/v1`; the test suite is the only thing that normally sets it. |
 | `INTERVALS_DELETE_MODE` | *Optional.* `safe` (default), `full` or `none` — how much deleting the server will do. See [Deleting](#deleting-is-gated) below. An unknown value exits with the list of valid ones. |
+| `INTERVALS_TIMEZONE` | *Optional.* IANA zone, e.g. `America/Chicago`, that decides what "today" is for the `safe` delete gate and `get_fitness_chart`. Defaults to the host's own zone, which is right whenever the server runs on your machine. |
 
 > **Note:** there is no `dotenv` dependency, so a `.env` file is **not** loaded
 > automatically. `.env.example` is a reference for the values you need — supply
@@ -98,19 +100,99 @@ For development without a build step:
 npm run dev
 ```
 
+## Hosting it for others
+
+The same tools can run as one hosted server that you and your friends each add
+to Claude as a custom connector, from the web, desktop or phone apps. Each
+person signs in once with **their own** Intervals.icu API key, so each person
+sees only their own account. It runs on Cloudflare Workers, and the free plan
+is enough for a handful of people.
+
+### How it works
+
+- `worker/index.ts` makes the Worker its own OAuth 2.1 server with
+  [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider),
+  which handles client registration, PKCE and tokens, the way claude.ai
+  connectors expect.
+- When someone connects, Claude opens `/authorize`
+  (`worker/authorize.ts`). They enter an **invite code**, their API key, and
+  optionally their athlete ID, timezone and delete mode. The key is checked
+  against Intervals.icu once, before any grant exists.
+- The key is stored only in the grant's `props`, which the library encrypts
+  with a key derived from that user's token. Tokens are stored only as
+  hashes. Someone reading the KV namespace cannot recover anyone's API key.
+- Each request to `/mcp` builds a server bound to the caller's own
+  credentials (`worker/mcp.ts`). Nothing is shared between users.
+
+### Deploying
+
+You need a free Cloudflare account. From the clone:
+
+```bash
+npm install
+npx wrangler login
+npx wrangler kv namespace create OAUTH_KV   # paste the printed id into wrangler.toml
+openssl rand -hex 16                          # one invite code per friend
+npx wrangler secret put INVITE_CODES          # paste them, comma-separated
+npm run deploy
+```
+
+`npm run deploy` prints the Worker's URL, e.g.
+`https://intervals-mcp.<your-subdomain>.workers.dev`.
+
+### Connecting (you and each friend)
+
+In Claude: **Settings → Connectors → Add custom connector**. Name it
+Intervals.icu and use the URL with `/mcp` on the end:
+
+```
+https://intervals-mcp.<your-subdomain>.workers.dev/mcp
+```
+
+Claude opens the sign-in page. Enter the invite code you were given and your
+API key (intervals.icu → Settings → Developer Settings). The athlete ID is
+read from the key when the field is left blank. The timezone is filled in
+from the browser. A connection stays signed in while it is used, and lapses
+after 60 days unused.
+
+### Running it locally
+
+```bash
+cp .dev.vars.example .dev.vars   # set INVITE_CODES
+npm run dev:worker               # http://localhost:8787/mcp
+```
+
+### Things to know
+
+- **Trust.** Friends hand their write-capable API key to your Worker. It is
+  stored encrypted and never logged, but code you deploy handles it in memory.
+  Anyone can cut off access by regenerating their key in Intervals.icu.
+- **Revoking an invite.** Remove the code from `INVITE_CODES` and set the
+  secret again. That stops new sign-ins with it. Grants already made last
+  until they lapse or the friend regenerates their key.
+- **Free-plan CPU limit.** Workers Free allows 10 ms of CPU per request.
+  Waiting on Intervals.icu doesn't count toward it. Most tools use about a
+  millisecond, but `get_activity_streams` on a long activity has to parse
+  roughly 1.4 MB of JSON (about 15 ms measured for a 4-hour ride with every
+  channel). It can fail with Cloudflare error 1102. Asking for only the
+  channels you need (`types`) avoids that. The paid plan ($5/month) raises
+  the limit to 30 s.
+- `INTERVALS_BASE_URL` can be set as a Worker var only to point the server at
+  a fake API, as the tests do.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-85 [vitest](https://vitest.dev) tests, about 1.5 seconds. **No credentials and
+144 [vitest](https://vitest.dev) tests, about 4 seconds. **No credentials and
 no network access are needed** — nothing in the suite contacts Intervals.icu.
 `npm test` builds first (via `pretest`), because the protocol tests spawn the
 compiled `dist/index.js`. `npm run test:watch` reruns on change, and
-`npm run typecheck` checks `src` and `test` together.
+`npm run typecheck` checks `src`, `test` and `worker`.
 
-Three layers:
+Four layers:
 
 - **`test/transform.test.ts`** — the pure helpers, no I/O: `decimate` (including
   the `max_points: 1` case that once divided by zero), `downsampleStreams`,
@@ -125,6 +207,12 @@ Three layers:
   for the handler rules (the either/or on `get_activity_best_efforts`, date
   rejection before any HTTP call) and a handful of end-to-end calls against the
   fake API.
+- **`test/worker.test.ts`** — the hosted Worker under `wrangler dev` (local
+  workerd and KV, nothing deployed), driven through the whole OAuth flow the
+  way claude.ai drives it: registration, the sign-in page (wrong invite, wrong
+  key, Cancel), the token exchange, then `tools/list` and a `tools/call` that
+  must reach the fake API with that user's own key and athlete ID.
+  `test/server.test.ts` covers the delete-mode and timezone helpers.
 
 ## Tools
 
@@ -284,8 +372,9 @@ the split, so a new tool cannot be added without a hint.
   `type`, since eFTP is per sport. All fourteen categories in the enum were
   accepted by the live API.
 - `get_fitness_chart` reports future days as `projected` by comparing dates
-  against the host's local date, which is the athlete's own day only when the
-  server runs on their machine — the stdio case, but not a remote one.
+  against "today" in `INTERVALS_TIMEZONE` (or the timezone chosen at hosted
+  sign-in), falling back to the host's zone. A hosted server with neither
+  set would count days in UTC.
 - No tool declares an `outputSchema`, so a client cannot validate a result
   against a promised shape before handing it to a model.
 - The test suite never contacts Intervals.icu, so it pins down this server's

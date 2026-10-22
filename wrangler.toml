@@ -1,0 +1,19 @@
+# Cloudflare Workers deployment of the hosted, multi-user server. See
+# "Hosting it for others" in README.md. The stdio server does not use this.
+name = "intervals-mcp"
+main = "worker/index.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+# OAuth clients, grants and tokens. Tokens are stored only as hashes and each
+# grant's props (the user's API key) are encrypted. Create the namespace with
+# `npx wrangler kv namespace create OAUTH_KV` and paste its id here.
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+# Secrets, set with `npx wrangler secret put <NAME>` (or .dev.vars locally):
+#   INVITE_CODES  comma-separated codes a friend enters to sign in
+
+[observability]
+enabled = true

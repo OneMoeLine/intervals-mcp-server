@@ -1,0 +1,3 @@
+# Copy to .dev.vars for `npm run dev:worker`. Deployed Workers take these as
+# secrets instead: `npx wrangler secret put INVITE_CODES`.
+INVITE_CODES=replace-with-a-long-random-code
