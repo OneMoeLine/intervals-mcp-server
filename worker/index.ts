@@ -6,8 +6,8 @@ import type { Props } from "./props.js";
 export interface Env {
   OAUTH_KV: KVNamespace;
   OAUTH_PROVIDER: OAuthHelpers;
-  /** Comma-separated invite codes, set with `wrangler secret put`. */
-  INVITE_CODES?: string;
+  /** The shared code people enter to sign in, set with `wrangler secret put`. */
+  INVITE_CODE?: string;
   /** API root override, for local end-to-end tests against a fake server. */
   INTERVALS_BASE_URL?: string;
 }
@@ -36,7 +36,7 @@ function providerFor(origin: string): OAuthProvider<Env> {
           const url = new URL(request.url);
           if (url.pathname === "/authorize") {
             return handleAuthorize(request, env.OAUTH_PROVIDER, {
-              inviteCodes: env.INVITE_CODES,
+              inviteCode: env.INVITE_CODE,
               baseUrl: env.INTERVALS_BASE_URL,
             });
           }

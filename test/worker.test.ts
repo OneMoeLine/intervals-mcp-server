@@ -57,7 +57,7 @@ beforeAll(async () => {
       "dev",
       "--port", String(port),
       "--ip", "127.0.0.1",
-      "--var", `INVITE_CODES:other-code,${INVITE}`,
+      "--var", `INVITE_CODE:${INVITE}`,
       "--var", `INTERVALS_BASE_URL:${fake.baseUrl}`,
       "--persist-to", state,
       "--show-interactive-dev-session=false",
