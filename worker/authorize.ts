@@ -35,8 +35,8 @@ export interface ConsentHelpers<R extends { scope: string[] }> {
 }
 
 export interface AuthorizeOptions {
-  /** Comma-separated invite codes. Sign-in is closed when there are none. */
-  inviteCodes?: string;
+  /** The shared code people enter to sign in. Sign-in is closed without one. */
+  inviteCode?: string;
   /** API root override, for tests against a fake server. */
   baseUrl?: string;
 }
@@ -129,15 +129,12 @@ async function checkSignIn(
   input: FormInput,
   options: AuthorizeOptions
 ): Promise<{ props: Props } | { error: string }> {
-  const codes = (options.inviteCodes ?? "")
-    .split(",")
-    .map((code) => code.trim())
-    .filter(Boolean);
-  if (codes.length === 0) {
+  const expected = (options.inviteCode ?? "").trim();
+  if (!expected) {
     return { error: "This server is not accepting sign-ins right now." };
   }
   const invite = String(form.get("invite") ?? "").trim();
-  if (!(await matchesAny(invite, codes))) {
+  if (!(await matches(invite, expected))) {
     return { error: "That invite code is not valid." };
   }
 
@@ -184,22 +181,20 @@ async function checkSignIn(
   return { props: { apiKey, athleteId, deleteMode, timeZone } };
 }
 
-/** Compare against every code by SHA-256 digest, so neither the time taken
- *  nor an early exit says how much of a guess was right. */
-async function matchesAny(candidate: string, codes: string[]): Promise<boolean> {
+/** Compare by SHA-256 digest, so neither the time taken nor an early exit
+ *  says how much of a guess was right. */
+async function matches(candidate: string, expected: string): Promise<boolean> {
   const digest = async (value: string) =>
     new Uint8Array(
       await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))
     );
-  const given = await digest(candidate);
-  let matched = false;
-  for (const code of codes) {
-    const expected = await digest(code);
-    let diff = 0;
-    for (let i = 0; i < expected.length; i++) diff |= expected[i] ^ given[i];
-    matched = matched || diff === 0;
-  }
-  return matched;
+  const [given, wanted] = await Promise.all([
+    digest(candidate),
+    digest(expected),
+  ]);
+  let diff = 0;
+  for (let i = 0; i < wanted.length; i++) diff |= wanted[i] ^ given[i];
+  return diff === 0;
 }
 
 const escape = (value: string) =>

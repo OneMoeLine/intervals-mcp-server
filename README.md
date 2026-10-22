@@ -132,8 +132,8 @@ You need a free Cloudflare account. From the clone:
 npm install
 npx wrangler login
 npx wrangler kv namespace create OAUTH_KV   # paste the printed id into wrangler.toml
-openssl rand -hex 16                          # one invite code per friend
-npx wrangler secret put INVITE_CODES          # paste them, comma-separated
+openssl rand -hex 16                          # the invite code you'll share
+npx wrangler secret put INVITE_CODE           # paste it
 npm run deploy
 ```
 
@@ -149,7 +149,7 @@ Intervals.icu and use the URL with `/mcp` on the end:
 https://intervals-mcp.<your-subdomain>.workers.dev/mcp
 ```
 
-Claude opens the sign-in page. Enter the invite code you were given and your
+Claude opens the sign-in page. Enter the invite code and your
 API key (intervals.icu → Settings → Developer Settings). The athlete ID is
 read from the key when the field is left blank. The timezone is filled in
 from the browser. A connection stays signed in while it is used, and lapses
@@ -158,7 +158,7 @@ after 60 days unused.
 ### Running it locally
 
 ```bash
-cp .dev.vars.example .dev.vars   # set INVITE_CODES
+cp .dev.vars.example .dev.vars   # set INVITE_CODE
 npm run dev:worker               # http://localhost:8787/mcp
 ```
 
@@ -167,9 +167,12 @@ npm run dev:worker               # http://localhost:8787/mcp
 - **Trust.** Friends hand their write-capable API key to your Worker. It is
   stored encrypted and never logged, but code you deploy handles it in memory.
   Anyone can cut off access by regenerating their key in Intervals.icu.
-- **Revoking an invite.** Remove the code from `INVITE_CODES` and set the
-  secret again. That stops new sign-ins with it. Grants already made last
-  until they lapse or the friend regenerates their key.
+- **One shared code.** Everyone, you included, signs in with the same
+  `INVITE_CODE`, so there is no list to keep track of. To change it, run
+  `npx wrangler secret put INVITE_CODE` again and give people the new one.
+  That affects only new sign-ins: anyone already connected stays connected
+  until their sign-in lapses or they regenerate their Intervals.icu key. It
+  also means you can't shut out one person without changing it for all.
 - **Free-plan CPU limit.** Workers Free allows 10 ms of CPU per request.
   Waiting on Intervals.icu doesn't count toward it. Most tools use about a
   millisecond, but `get_activity_streams` on a long activity has to parse
