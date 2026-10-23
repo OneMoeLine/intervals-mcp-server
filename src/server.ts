@@ -12,6 +12,7 @@ import {
   FOLDER_SUMMARY_FIELDS,
   HISTOGRAM_METRICS,
   HR_CURVE_SUMMARY_FIELDS,
+  INTERVAL_SEARCH_SUMMARY_FIELDS,
   INTERVAL_SUMMARY_FIELDS,
   PACE_CURVE_SUMMARY_FIELDS,
   POWER_CURVE_SUMMARY_FIELDS,
@@ -45,7 +46,7 @@ const schemas = new Map<string, z.ZodObject>();
 
 /** A tool's input schema, built once per process and reused by every server
  *  after the first. The hosted Worker builds a server per request, and
- *  constructing the 34 zod schemas costs more CPU than the rest of a request
+ *  constructing the 35 zod schemas costs more CPU than the rest of a request
  *  put together. Keyed by tool name: no schema depends on the config. */
 function schema<T extends z.ZodObject>(name: string, build: () => T): T {
   let cached = schemas.get(name) as T | undefined;
@@ -312,6 +313,90 @@ export function createServer(config: ServerConfig): McpServer {
           INTERVAL_SUMMARY_FIELDS
         )
       );
+    }
+  );
+
+  server.registerTool(
+    "search_intervals",
+    {
+      title: "Search intervals",
+      description:
+        "Find activities across the athlete's whole history that contain intervals " +
+        "of a given length and intensity, e.g. every 15-25 minute effort at 90-105% " +
+        "of threshold. Intensity is a percentage of the threshold for the interval's " +
+        "target (FTP for power, threshold HR, threshold pace). Returns matching " +
+        "activities, newest first, each with an `interval_summary` such as " +
+        "\"2x 8m 162w\"; use get_activity_intervals on one for the per-lap detail. " +
+        "There is no date filter - narrow with limit, or compare start_date_local.",
+      inputSchema: schema("search_intervals", () =>
+        z.object({
+          min_secs: z
+            .number()
+            .int()
+            .min(0)
+            .optional()
+            .describe("Shortest interval to match, in seconds (default 0)"),
+          max_secs: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("Longest interval to match, in seconds (default 86400)"),
+          min_intensity: z
+            .number()
+            .min(0)
+            .optional()
+            .describe("Lowest intensity, % of threshold e.g. 90 (default 0)"),
+          max_intensity: z
+            .number()
+            .min(0)
+            .optional()
+            .describe("Highest intensity, % of threshold e.g. 105 (default 999)"),
+          type: z
+            .enum(["AUTO", "POWER", "HR", "PACE"])
+            .optional()
+            .describe(
+              "What the interval targeted - not the sport. Omit to match any."
+            ),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(200)
+            .optional()
+            .describe("Maximum number of activities to return (default 30)"),
+          fields: fieldsParam(INTERVAL_SEARCH_SUMMARY_FIELDS, 184),
+        })
+      ),
+      annotations: READ_ONLY,
+    },
+    async ({
+      min_secs = 0,
+      max_secs = 86_400,
+      min_intensity = 0,
+      max_intensity = 999,
+      type,
+      limit = 30,
+      fields,
+    }) => {
+      if (min_secs > max_secs || min_intensity > max_intensity) {
+        throw new Error("Each minimum must be no greater than its maximum.");
+      }
+      // The API answers 422 unless all four bounds are sent, so the open ends
+      // go over the wire as explicit wide defaults.
+      const params: Record<string, string> = {
+        minSecs: String(min_secs),
+        maxSecs: String(max_secs),
+        minIntensity: String(min_intensity),
+        maxIntensity: String(max_intensity),
+        limit: String(limit),
+      };
+      if (type) params.type = type;
+      const data = await client.get(
+        `/athlete/${client.athleteId}/activities/interval-search`,
+        params
+      );
+      return json(projectFields(data, fields, INTERVAL_SEARCH_SUMMARY_FIELDS));
     }
   );
 

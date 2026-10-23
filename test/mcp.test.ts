@@ -11,6 +11,7 @@ const EXPECTED_TOOLS = [
   "get_activity",
   "search_activities",
   "get_activity_intervals",
+  "search_intervals",
   "get_activity_streams",
   "get_activity_power_curve",
   "get_activity_best_efforts",
@@ -101,8 +102,8 @@ describe("startup", () => {
 });
 
 describe("tools/list", () => {
-  it("exposes all 34 tools", () => {
-    expect(tools).toHaveLength(34);
+  it("exposes all 35 tools", () => {
+    expect(tools).toHaveLength(35);
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());
   });
 
@@ -212,7 +213,7 @@ describe("tools/list", () => {
     });
   });
 
-  it("offers a fields parameter on each of the eleven trimming tools", () => {
+  it("offers a fields parameter on each of the twelve trimming tools", () => {
     const withFields = tools
       .filter((t) => "fields" in t.inputSchema.properties)
       .map((t) => t.name)
@@ -229,6 +230,7 @@ describe("tools/list", () => {
       "list_events",
       "list_folders",
       "list_wellness",
+      "search_intervals",
     ]);
   });
 });
@@ -563,6 +565,50 @@ describe("tools/call against the fake API", () => {
       arguments: { activity_id: "i123", metric: "cadence" },
     });
     expect(res.result?.isError ?? Boolean(res.error)).toBe(true);
+    expect(fake.requests.length).toBe(before);
+  });
+
+  it("sends all four interval-search bounds and trims the activities", async () => {
+    fake.replyWith({
+      body: [
+        {
+          id: "i9",
+          name: "Threshold 3x12",
+          type: "Ride",
+          start_date_local: "2026-10-01T07:00:00",
+          interval_summary: ["3x 12m 262w"],
+          icu_training_load: 98,
+          average_cadence: 88,
+        },
+      ],
+    });
+    const res = await server.request("tools/call", {
+      name: "search_intervals",
+      arguments: { min_secs: 600, max_intensity: 105, type: "POWER" },
+    });
+
+    const req = fake.requests[fake.requests.length - 1];
+    expect(req.path).toBe("/athlete/i1/activities/interval-search");
+    expect(req.query).toEqual({
+      minSecs: "600",
+      maxSecs: "86400",
+      minIntensity: "0",
+      maxIntensity: "105",
+      limit: "30",
+      type: "POWER",
+    });
+    const [hit] = JSON.parse(res.result.content[0].text);
+    expect(hit.interval_summary).toEqual(["3x 12m 262w"]);
+    expect(hit).not.toHaveProperty("average_cadence");
+  });
+
+  it("rejects an interval search whose bounds are inverted", async () => {
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "search_intervals",
+      arguments: { min_secs: 1200, max_secs: 600 },
+    });
+    expect(res.result.isError).toBe(true);
     expect(fake.requests.length).toBe(before);
   });
 

@@ -67,6 +67,20 @@ export const fieldsParam = (summary: string[], total: number) =>
         `the full record has ~${total} fields, many of them null. Pass ["*"] for everything.`
     );
 
+/** Interval search returns whole activities; the match is in
+ *  `interval_summary`, so the default keeps little else. */
+export const INTERVAL_SEARCH_SUMMARY_FIELDS = [
+  "id",
+  "name",
+  "type",
+  "start_date_local",
+  "distance",
+  "moving_time",
+  "icu_training_load",
+  "icu_intensity",
+  "interval_summary",
+];
+
 /** Per-lap records inside an activity's interval breakdown carry 84 fields. */
 export const INTERVAL_SUMMARY_FIELDS = [
   "id",
