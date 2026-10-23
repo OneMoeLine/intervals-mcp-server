@@ -140,6 +140,24 @@ npm run deploy
 `npm run deploy` prints the Worker's URL, e.g.
 `https://intervals-mcp.<your-subdomain>.workers.dev`.
 
+### Automatic deploys
+
+`.github/workflows/deploy.yml` runs the typecheck and tests on every push to
+`main` (so on every merged pull request) and, if they pass, runs
+`wrangler deploy`. It deploys `wrangler.toml` as-is, so the `OAUTH_KV`
+namespace and everyone's sign-ins are untouched, and secrets such as
+`INVITE_CODE` stay as you set them. You can also run it by hand from the
+**Actions** tab (**Deploy Worker → Run workflow**).
+
+It needs two repository secrets, added once under **Settings → Secrets and
+variables → Actions → New repository secret**:
+
+- `CLOUDFLARE_API_TOKEN`: in the Cloudflare dashboard, **My Profile → API
+  Tokens → Create Token**, use the **Edit Cloudflare Workers** template, limit
+  it to your account, and create it.
+- `CLOUDFLARE_ACCOUNT_ID`: shown on the dashboard's **Workers & Pages**
+  overview, or by `npx wrangler whoami`.
+
 ### Connecting (you and each friend)
 
 In Claude: **Settings → Connectors → Add custom connector**. Name it
