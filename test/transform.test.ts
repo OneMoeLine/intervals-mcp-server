@@ -14,6 +14,7 @@ import {
   redact,
   compactBody,
   fitnessSeries,
+  histogram,
 } from "../src/transform.js";
 
 /** 0..n-1, so a sampled value doubles as its index in the original. */
@@ -377,6 +378,19 @@ describe("compactBody", () => {
       empty: "",
       no: false,
     });
+  });
+});
+
+describe("histogram", () => {
+  it("returns nothing for an activity without the data", () => {
+    expect(histogram([])).toEqual({ total_secs: 0, buckets: [] });
+    expect(histogram(null)).toEqual({ total_secs: 0, buckets: [] });
+  });
+
+  it("keeps an open-ended bucket and skips malformed ones", () => {
+    expect(
+      histogram([{ min: 400, secs: 30 }, "junk", { min: 0, max: 100, secs: "x" }])
+    ).toEqual({ total_secs: 30, buckets: [{ min: 400, max: null, secs: 30 }] });
   });
 });
 

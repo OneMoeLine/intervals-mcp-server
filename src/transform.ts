@@ -394,6 +394,37 @@ export function downsampleStreams(data: unknown, maxPoints: number): unknown {
   });
 }
 
+/** The activity histograms, each at `/activity/{id}/{metric}-histogram`. */
+export const HISTOGRAM_METRICS = ["power", "hr", "pace", "gap"] as const;
+
+export interface HistogramBucket {
+  min: number | null;
+  max: number | null;
+  secs: number;
+}
+
+/** Reduce a histogram response - a bare array of buckets - to the three
+ *  fields the API actually fills in. The spec documents more per bucket, but
+ *  none of the histogram endpoints populate them. Empty buckets go: every
+ *  bucket carries its own bounds, so dropping one loses nothing but tokens. */
+export function histogram(data: unknown): {
+  total_secs: number;
+  buckets: HistogramBucket[];
+} {
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const buckets: HistogramBucket[] = [];
+  for (const raw of Array.isArray(data) ? data : []) {
+    if (raw === null || typeof raw !== "object") continue;
+    const b = raw as Record<string, unknown>;
+    const secs = num(b.secs) ?? 0;
+    if (secs <= 0) continue;
+    buckets.push({ min: num(b.min), max: num(b.max), secs });
+  }
+  buckets.sort((a, b) => (a.min ?? -Infinity) - (b.min ?? -Infinity));
+  const total_secs = buckets.reduce((sum, b) => sum + b.secs, 0);
+  return { total_secs, buckets };
+}
+
 /** Drop keys whose value is undefined, so a partial update sends only what the
  *  caller actually supplied. An explicit null is kept: it is how the API is
  *  told to clear a field, which is different from leaving it alone. */

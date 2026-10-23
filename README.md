@@ -5,7 +5,7 @@ An [MCP](https://modelcontextprotocol.io) server that exposes your
 wellness, calendar, workouts, gear and routes — to an MCP client such as Claude.
 
 Runs locally over stdio, or as a hosted multi-user server on Cloudflare Workers
-(see [Hosting it for others](#hosting-it-for-others)). 33 tools — 24 read-only and 9 that write — plus one
+(see [Hosting it for others](#hosting-it-for-others)). 34 tools — 25 read-only and 9 that write — plus one
 resource, the Intervals.icu workout syntax reference. Built on v2 of the MCP
 TypeScript SDK (`@modelcontextprotocol/server`).
 
@@ -224,7 +224,7 @@ Four layers:
   schedule and its cap, per-attempt timeouts and error-body truncation. The
   backoff is injected as zero, so the retry tests do not sleep.
 - **`test/mcp.test.ts`** — the real server binary over stdio: `initialize`, then
-  `tools/list` asserting all 33 tools and their input schemas, plus `tools/call`
+  `tools/list` asserting all 34 tools and their input schemas, plus `tools/call`
   for the handler rules (the either/or on `get_activity_best_efforts`, date
   rejection before any HTTP call) and a handful of end-to-end calls against the
   fake API.
@@ -241,7 +241,8 @@ Four layers:
 
 **Activities** — `list_activities`, `get_activity`, `search_activities`,
 `get_activity_intervals`, `get_activity_streams`, `get_activity_power_curve`,
-`get_activity_best_efforts`, `get_activity_weather`, `update_activity`
+`get_activity_best_efforts`, `get_activity_weather`, `get_activity_histogram`,
+`update_activity`
 *(writes)*
 
 **Power, HR and pace** — `get_power_curves`, `get_hr_curves`,
@@ -359,7 +360,7 @@ because a model can set an argument itself:
 template and carries no training history of its own. Deleting one leaves
 calendar events already created from it untouched.
 
-**Reads and writes are labelled.** 24 of the 33 tools only read, and are
+**Reads and writes are labelled.** 25 of the 34 tools only read, and are
 annotated `readOnlyHint: true` so a client can auto-approve them. The nine
 writers come in three shapes. The updates — `update_activity`,
 `update_wellness`, `update_event`, `update_workout` — overwrite fields on an
@@ -401,8 +402,9 @@ the split, so a new tool cannot be added without a hint.
 - The test suite never contacts Intervals.icu, so it pins down this server's
   behaviour rather than the upstream API's. A change in what Intervals.icu
   actually returns would not be caught by it.
-- Of the 33 tools, sixteen are driven end to end against the fake API
-  (`list_activities`, `get_activity_streams`, `get_power_curves`,
+- Of the 34 tools, seventeen are driven end to end against the fake API
+  (`list_activities`, `get_activity_streams`, `get_activity_histogram`,
+  `get_power_curves`,
   `get_hr_curves`, `get_pace_curves`,
   `update_wellness`, `list_events`, `get_event`, `create_event`,
   `update_event`, `delete_event`, `update_activity`, `create_workout`,

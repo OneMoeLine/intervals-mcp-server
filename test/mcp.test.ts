@@ -15,6 +15,7 @@ const EXPECTED_TOOLS = [
   "get_activity_power_curve",
   "get_activity_best_efforts",
   "get_activity_weather",
+  "get_activity_histogram",
   "update_activity",
   "get_power_curves",
   "get_hr_curves",
@@ -100,8 +101,8 @@ describe("startup", () => {
 });
 
 describe("tools/list", () => {
-  it("exposes all 33 tools", () => {
-    expect(tools).toHaveLength(33);
+  it("exposes all 34 tools", () => {
+    expect(tools).toHaveLength(34);
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());
   });
 
@@ -527,6 +528,42 @@ describe("tools/call against the fake API", () => {
       paceModels: [{ type: "CS", criticalSpeed: 4.48, dPrime: 28.4 }],
     });
     expect(curveOf(adjusted).type).toBe("GAP");
+  });
+
+  it("asks for the chosen histogram and drops the empty buckets", async () => {
+    fake.replyWith({
+      body: [
+        { min: 200, max: 225, secs: 600, start: null, movingSecs: null },
+        { min: 175, max: 200, secs: 300 },
+        { min: 225, max: 250, secs: 0 },
+      ],
+    });
+    const res = await server.request("tools/call", {
+      name: "get_activity_histogram",
+      arguments: { activity_id: "i123", metric: "power" },
+    });
+
+    const req = fake.requests[fake.requests.length - 1];
+    expect(req.method).toBe("GET");
+    expect(req.path).toBe("/activity/i123/power-histogram");
+    expect(JSON.parse(res.result.content[0].text)).toEqual({
+      metric: "power",
+      total_secs: 900,
+      buckets: [
+        { min: 175, max: 200, secs: 300 },
+        { min: 200, max: 225, secs: 600 },
+      ],
+    });
+  });
+
+  it("rejects a histogram metric the API does not have", async () => {
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "get_activity_histogram",
+      arguments: { activity_id: "i123", metric: "cadence" },
+    });
+    expect(res.result?.isError ?? Boolean(res.error)).toBe(true);
+    expect(fake.requests.length).toBe(before);
   });
 
   it("surfaces an upstream error as an error result", async () => {
