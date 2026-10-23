@@ -1,0 +1,36 @@
+# Deploys the hosted Worker to Cloudflare on every push to main (which is what
+# merging a pull request does), after the typecheck and tests pass. It can also
+# be run by hand from the Actions tab. See "Automatic deploys" in README.md.
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time; a newer push waits for the running one to finish.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # Uses wrangler.toml as-is: the OAUTH_KV namespace keeps everyone's
+      # sign-ins, and INVITE_CODE stays as set with `wrangler secret put`.
+      - run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
