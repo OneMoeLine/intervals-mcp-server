@@ -10,6 +10,7 @@ import {
   EVENT_SUMMARY_FIELDS,
   FITNESS_FIELDS,
   FOLDER_SUMMARY_FIELDS,
+  HISTOGRAM_METRICS,
   HR_CURVE_SUMMARY_FIELDS,
   INTERVAL_SUMMARY_FIELDS,
   PACE_CURVE_SUMMARY_FIELDS,
@@ -20,6 +21,7 @@ import {
   downsampleStreams,
   fieldsParam,
   fitnessSeries,
+  histogram,
   isoDate,
   isoDateTime,
   project,
@@ -43,7 +45,7 @@ const schemas = new Map<string, z.ZodObject>();
 
 /** A tool's input schema, built once per process and reused by every server
  *  after the first. The hosted Worker builds a server per request, and
- *  constructing the 33 zod schemas costs more CPU than the rest of a request
+ *  constructing the 34 zod schemas costs more CPU than the rest of a request
  *  put together. Keyed by tool name: no schema depends on the config. */
 function schema<T extends z.ZodObject>(name: string, build: () => T): T {
   let cached = schemas.get(name) as T | undefined;
@@ -432,6 +434,38 @@ export function createServer(config: ServerConfig): McpServer {
     },
     async ({ activity_id }) =>
       json(await client.get(`/activity/${activity_id}/weather-summary`))
+  );
+
+  server.registerTool(
+    "get_activity_histogram",
+    {
+      title: "Get activity histogram",
+      description:
+        "Get time-in-range for one activity as a histogram: how many seconds were " +
+        "spent in each power, heart rate, pace or grade adjusted pace band. A far " +
+        "cheaper read than a stream when the question is about distribution " +
+        "(\"how long was I above 300 W\"). Each bucket is {min, max, secs}; power " +
+        "is in watts, HR in bpm, and pace and gap bounds are passed through as the " +
+        "API returns them (speed in m/s). Empty buckets are left out, and an " +
+        "activity without that data returns no buckets.",
+      inputSchema: schema("get_activity_histogram", () =>
+        z.object({
+          activity_id: z.string().describe("The activity ID"),
+          metric: z
+            .enum(HISTOGRAM_METRICS)
+            .describe(
+              "What to bucket by: power, hr, pace, or gap (grade adjusted pace)"
+            ),
+        })
+      ),
+      annotations: READ_ONLY,
+    },
+    async ({ activity_id, metric }) => {
+      const data = await client.get<unknown>(
+        `/activity/${activity_id}/${metric}-histogram`
+      );
+      return json({ metric, ...histogram(data) });
+    }
   );
 
   server.registerTool(

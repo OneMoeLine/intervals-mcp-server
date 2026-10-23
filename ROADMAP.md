@@ -80,51 +80,56 @@ guessing would not have:
 reads, but the spec does not list it and the live API ignores it — `curves`
 ("42d", "all") is what actually picks the window.
 
+Then **`get_activity_histogram`** — 34 tools, 25 read-only. One tool with a
+`metric` argument (`power`, `hr`, `pace`, `gap`) rather than four, since the
+endpoints differ only by path. Each returns a bare array of buckets; the spec
+documents more per bucket than `min`, `max` and `secs`, but none of the
+histogram endpoints fill the rest in, so only those three are kept and empty
+buckets are dropped. Not yet exercised live: the pace and GAP bucket units
+(expected m/s) still need confirming against a real run.
+
 ## Tier 1 — next up
 
-1. **Histograms** — `/activity/{id}/power-histogram`, `hr-histogram`,
-   `pace-histogram`, `gap-histogram`. Compact and well suited to an LLM: a
-   histogram is a far cheaper read than a stream.
-2. **`search_intervals`** — find comparable intervals across the whole history
+1. **`search_intervals`** — find comparable intervals across the whole history
    ("every 20-minute effort above 95% this year"). The best analysis-shaped tool
    upstream has that we lack.
-3. **Sport settings writes** — FTP, FTHR, threshold pace, zones per sport, via
+2. **Sport settings writes** — FTP, FTHR, threshold pace, zones per sport, via
    `/athlete/{athleteId}/sport-settings`. Readable today only through
    `get_athlete fields:["sportSettings"]` and not writable, so "bump my FTP to
    265" is still a trip to the website. Note `sport-settings/{id}/apply`
    rewrites zones on *past* activities — that one is destructive and belongs
    behind the delete gate.
-4. **Gear writes and maintenance reminders** — small, self-contained, and the
+3. **Gear writes and maintenance reminders** — small, self-contained, and the
    kind of thing people actually want nagging about.
-5. **Calendar bulk operations** — `events/bulk`, `duplicate-events` (copy a
+4. **Calendar bulk operations** — `events/bulk`, `duplicate-events` (copy a
    session N times with spacing), `events/apply-plan` (drop a folder onto the
    calendar from a date). Hand-building a 12-week block one `create_event` at a
    time burns context; `apply-plan` plus `create_folder` would make plans a
    two-call operation.
-6. **Activity messages** — read and post comments on an activity. The coach
+5. **Activity messages** — read and post comments on an activity. The coach
    feedback loop; also the only write path that talks to another human, so it
    deserves an explicit confirmation story.
 
 ## Tier 2 — nice to have
 
-7. **Annual training plan** — periodization targets and week notes.
-8. **`get_upcoming_workouts`** — the next N planned sessions with their IDs.
+6. **Annual training plan** — periodization targets and week notes.
+7. **`get_upcoming_workouts`** — the next N planned sessions with their IDs.
    Possibly just better defaults on `list_events` rather than a new tool.
-9. **`get_activities_around`** — the activities surrounding a given one, for
+8. **`get_activities_around`** — the activities surrounding a given one, for
    "what was I doing the week of that breakthrough ride".
-10. **Multi-athlete / coach support** — `list_athletes` with access levels, and
+9. **Multi-athlete / coach support** — `list_athletes` with access levels, and
     an optional `athlete_id` on the read tools. The athlete is currently fixed
     by `INTERVALS_ATHLETE_ID`. This is an architectural change, not a tool:
     worth deciding before the tool count grows further.
-11. **Athlete notes** read/write.
-12. **Custom items** — custom charts, fields, zones, dashboard panels. Large API
+10. **Athlete notes** read/write.
+11. **Custom items** — custom charts, fields, zones, dashboard panels. Large API
     surface, narrow audience; upstream ships a schema resource to make it usable.
-13. **File downloads** — original / FIT / GPX. Awkward over MCP (binary as
+12. **File downloads** — original / FIT / GPX. Awkward over MCP (binary as
     base64 bloats context); only worth it if we return a resource link or write
     to a path rather than inlining bytes.
-14. **Manual and route writes** — `bulk_create_manual_activities` (upsert by
+13. **Manual and route writes** — `bulk_create_manual_activities` (upsert by
     external ID) is how you backfill non-synced training.
-15. **Event deletes beyond one at a time** — `events/bulk-delete` and the
+14. **Event deletes beyond one at a time** — `events/bulk-delete` and the
     `others`/`notBefore` options on the single delete. Deliberately left out of
     the first pass: "delete the event I named" is easy to reason about, "delete
     everything added alongside it" is not.

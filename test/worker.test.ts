@@ -286,7 +286,7 @@ describe("hosted worker", () => {
     expect((await initialize(token)).status).toBe(200);
 
     const tools = await rpc(token, "tools/list");
-    expect(tools.body.result.tools).toHaveLength(33);
+    expect(tools.body.result.tools).toHaveLength(34);
 
     const before = fake.requests.length;
     const call = await rpc(token, "tools/call", {
@@ -304,7 +304,7 @@ describe("hosted worker", () => {
     const token = await signIn({ delete_mode: "none" });
     const tools = await rpc(token, "tools/list");
     const names = tools.body.result.tools.map((t: { name: string }) => t.name);
-    expect(names).toHaveLength(31);
+    expect(names).toHaveLength(32);
     expect(names).not.toContain("delete_event");
     expect(names).not.toContain("delete_workout");
   });
