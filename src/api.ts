@@ -74,8 +74,10 @@ export class IntervalsClient {
     this.authHeader =
       "Basic " + btoa(`API_KEY:${apiKey}`);
     this.athleteId = athleteId;
-    this.baseUrl =
-      options.baseUrl ?? process.env.INTERVALS_BASE_URL ?? DEFAULT_BASE_URL;
+    // Without a trailing slash, so `${baseUrl}${path}` never doubles one up.
+    this.baseUrl = (
+      options.baseUrl ?? process.env.INTERVALS_BASE_URL ?? DEFAULT_BASE_URL
+    ).replace(/\/+$/, "");
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.retryDelay = options.retryDelay ?? retryDelayMs;
   }

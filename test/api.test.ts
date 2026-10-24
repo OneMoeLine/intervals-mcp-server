@@ -335,6 +335,15 @@ describe("route binding", () => {
     expect(fake.requests.map((r) => r.path)).toEqual(["/api/v1/athlete/i1/workouts/9"]);
   });
 
+  it("tolerates a trailing slash on the base URL", async () => {
+    await clientFor({ baseUrl: `${fake.baseUrl}/` }).get("/athlete/i1");
+    await clientFor({ baseUrl: `${fake.baseUrl}/api/v1/` }).get("/athlete/i1");
+    expect(fake.requests.map((r) => r.path)).toEqual([
+      "/athlete/i1",
+      "/api/v1/athlete/i1",
+    ]);
+  });
+
   it("segment() encodes, and refuses the segments encoding leaves alone", () => {
     expect(segment("i123")).toBe("i123");
     expect(segment(42)).toBe("42");
