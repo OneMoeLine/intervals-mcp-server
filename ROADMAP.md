@@ -108,15 +108,23 @@ to true unless explicit `hr_zones` are given. Deliberately left out:
 zones. That rewrites history, so it waits for a decision on how the delete
 gate should cover it.
 
+Then **`duplicate_events` and `apply_plan`** — 38 tools, 12 writers. Both
+`CREATE`. `duplicate_events` posts `eventIds`, `numCopies` and
+`weeksBetween` to `/duplicate-events` and trims the copies to the event
+summary set, so a 12-week repeat does not come back with twelve
+`workout_doc` blobs. `apply_plan` posts `folder_id` and `start_date_local`
+to `/events/apply-plan`; with `create_folder` (type `PLAN`) and
+`create_workout` (`day`) a whole block is now build-then-apply rather than
+one `create_event` per session. The optional `extra_workouts` on apply-plan
+is left out. Neither is verified live yet: which plan day lands on
+`start_date`, and what apply-plan returns.
+
 ## Tier 1 — next up
 
 1. **Gear writes and maintenance reminders** — small, self-contained, and the
    kind of thing people actually want nagging about.
-2. **Calendar bulk operations** — `events/bulk`, `duplicate-events` (copy a
-   session N times with spacing), `events/apply-plan` (drop a folder onto the
-   calendar from a date). Hand-building a 12-week block one `create_event` at a
-   time burns context; `apply-plan` plus `create_folder` would make plans a
-   two-call operation.
+2. **Bulk event create** — `events/bulk`, for a block that is not worth
+   saving as a plan. `apply_plan` covers the common case.
 3. **Activity messages** — read and post comments on an activity. The coach
    feedback loop; also the only write path that talks to another human, so it
    deserves an explicit confirmation story.
