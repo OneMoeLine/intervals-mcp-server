@@ -123,24 +123,24 @@ gate should cover it.
 
 ## Tier 2 — nice to have
 
-4. **Annual training plan** — periodization targets and week notes.
-5. **`get_upcoming_workouts`** — the next N planned sessions with their IDs.
+3. **Annual training plan** — periodization targets and week notes.
+4. **`get_upcoming_workouts`** — the next N planned sessions with their IDs.
    Possibly just better defaults on `list_events` rather than a new tool.
-6. **`get_activities_around`** — the activities surrounding a given one, for
+5. **`get_activities_around`** — the activities surrounding a given one, for
    "what was I doing the week of that breakthrough ride".
-7. **Multi-athlete / coach support** — `list_athletes` with access levels, and
+6. **Multi-athlete / coach support** — `list_athletes` with access levels, and
     an optional `athlete_id` on the read tools. The athlete is currently fixed
     by `INTERVALS_ATHLETE_ID`. This is an architectural change, not a tool:
     worth deciding before the tool count grows further.
-8. **Athlete notes** read/write.
-9. **Custom items** — custom charts, fields, zones, dashboard panels. Large API
+7. **Athlete notes** read/write.
+8. **Custom items** — custom charts, fields, zones, dashboard panels. Large API
     surface, narrow audience; upstream ships a schema resource to make it usable.
-10. **File downloads** — original / FIT / GPX. Awkward over MCP (binary as
+9. **File downloads** — original / FIT / GPX. Awkward over MCP (binary as
     base64 bloats context); only worth it if we return a resource link or write
     to a path rather than inlining bytes.
-11. **Manual and route writes** — `bulk_create_manual_activities` (upsert by
+10. **Manual and route writes** — `bulk_create_manual_activities` (upsert by
     external ID) is how you backfill non-synced training.
-12. **Event deletes beyond one at a time** — `events/bulk-delete` and the
+11. **Event deletes beyond one at a time** — `events/bulk-delete` and the
     `others`/`notBefore` options on the single delete. Deliberately left out of
     the first pass: "delete the event I named" is easy to reason about, "delete
     everything added alongside it" is not.
