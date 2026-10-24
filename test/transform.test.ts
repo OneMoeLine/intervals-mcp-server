@@ -343,6 +343,15 @@ describe("redact", () => {
     for (const r of out) expect(r.icu_api_key).toBe(REDACTION_MARKER);
   });
 
+  it("redacts at any depth", () => {
+    const out = JSON.stringify(
+      redact({ list: [{ inner: athlete }], other: athlete }, REDACTED_ATHLETE_FIELDS)
+    );
+    expect(out).not.toContain("a-real-secret-key");
+    expect(out).not.toContain("an-invite-token");
+    expect(out).toContain("someone@example.com");
+  });
+
   it("passes non-objects through unharmed", () => {
     expect(redact(null, REDACTED_ATHLETE_FIELDS)).toBeNull();
     expect(redact("text", REDACTED_ATHLETE_FIELDS)).toBe("text");

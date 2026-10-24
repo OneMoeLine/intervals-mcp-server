@@ -1,9 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { IntervalsClient } from "./api.js";
+import { IntervalsClient, segment } from "./api.js";
 import {
   ACTIVITY_SUMMARY_FIELDS,
   ATHLETE_SUMMARY_FIELDS,
+  DATE_RE,
   DEFAULT_STREAM_POINTS,
   EVENT_CATEGORIES,
   EVENT_CATEGORY_HELP,
@@ -19,6 +20,7 @@ import {
   POWER_CURVE_SUMMARY_FIELDS,
   REDACTED_ATHLETE_FIELDS,
   WELLNESS_SUMMARY_FIELDS,
+  activityId,
   compactBody,
   downsampleStreams,
   fieldsParam,
@@ -28,6 +30,7 @@ import {
   histogram,
   isoDate,
   isoDateTime,
+  numericId,
   project,
   projectFields,
   projectNested,
@@ -40,9 +43,18 @@ import { WORKOUT_SYNTAX } from "./workout-syntax.js";
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Wrap a payload as a tool result. Deliberately not pretty-printed: the
- *  indentation roughly doubles the token cost and nothing downstream reads it. */
+ *  indentation roughly doubles the token cost and nothing downstream reads it.
+ *  Credential fields are withheld here, at the one boundary every result
+ *  crosses, rather than trusting each handler to remember. */
 function json(data: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(redact(data, REDACTED_ATHLETE_FIELDS)),
+      },
+    ],
+  };
 }
 
 const schemas = new Map<string, z.ZodObject>();
@@ -159,6 +171,23 @@ export function createServer(config: ServerConfig): McpServer {
   });
   const DELETE_MODE = config.deleteMode;
 
+  /** An event's date as the calendar has it, YYYY-MM-DD. Safe mode's history
+   *  checks hang on this, so an event whose date cannot be read fails closed
+   *  rather than being treated as not-past. */
+  async function storedEventDate(eventId: number): Promise<string> {
+    const existing = await client.get<{ start_date_local?: string }>(
+      `/athlete/${client.athleteId}/events/${segment(eventId)}`
+    );
+    const date = existing?.start_date_local?.slice(0, 10);
+    if (!date || !DATE_RE.test(date)) {
+      throw new Error(
+        `Could not read the date of event ${eventId}, so delete mode "safe" ` +
+          `cannot tell whether it is in the past. Nothing was changed.`
+      );
+    }
+    return date;
+  }
+
   // ── Athlete ────────────────────────────────────────────────────────────────
 
   server.registerTool(
@@ -179,10 +208,7 @@ export function createServer(config: ServerConfig): McpServer {
       annotations: READ_ONLY,
     },
     async ({ fields }) => {
-      const data = redact(
-        await client.get(`/athlete/${client.athleteId}`),
-        REDACTED_ATHLETE_FIELDS
-      );
+      const data = await client.get(`/athlete/${client.athleteId}`);
       return json(projectFields(data, fields, ATHLETE_SUMMARY_FIELDS));
     }
   );
@@ -197,12 +223,7 @@ export function createServer(config: ServerConfig): McpServer {
       annotations: READ_ONLY,
     },
     async () =>
-      json(
-        redact(
-          await client.get(`/athlete/${client.athleteId}/profile`),
-          REDACTED_ATHLETE_FIELDS
-        )
-      )
+      json(await client.get(`/athlete/${client.athleteId}/profile`))
   );
 
   server.registerTool(
@@ -370,14 +391,14 @@ export function createServer(config: ServerConfig): McpServer {
         "compact summary by default; pass `fields` for other metrics.",
       inputSchema: schema("get_activity", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
           fields: fieldsParam(ACTIVITY_SUMMARY_FIELDS, 184),
         })
       ),
       annotations: READ_ONLY,
     },
     async ({ activity_id, fields }) => {
-      const data = await client.get(`/activity/${activity_id}`);
+      const data = await client.get(`/activity/${segment(activity_id)}`);
       return json(projectFields(data, fields, ACTIVITY_SUMMARY_FIELDS));
     }
   );
@@ -420,14 +441,14 @@ export function createServer(config: ServerConfig): McpServer {
         "individual laps inside `icu_intervals` and `icu_groups`.",
       inputSchema: schema("get_activity_intervals", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
           fields: fieldsParam(INTERVAL_SUMMARY_FIELDS, 84),
         })
       ),
       annotations: READ_ONLY,
     },
     async ({ activity_id, fields }) => {
-      const data = await client.get(`/activity/${activity_id}/intervals`);
+      const data = await client.get(`/activity/${segment(activity_id)}/intervals`);
       return json(
         projectNestedFields(
           data,
@@ -535,7 +556,7 @@ export function createServer(config: ServerConfig): McpServer {
         "genuinely need finer resolution.",
       inputSchema: schema("get_activity_streams", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
           types: z
             .array(z.string())
             .optional()
@@ -558,7 +579,7 @@ export function createServer(config: ServerConfig): McpServer {
     async ({ activity_id, types, max_points }) => {
       const params: Record<string, string> = {};
       if (types && types.length > 0) params.types = types.join(",");
-      const data = await client.get(`/activity/${activity_id}/streams`, params);
+      const data = await client.get(`/activity/${segment(activity_id)}/streams`, params);
       return json(downsampleStreams(data, max_points ?? DEFAULT_STREAM_POINTS));
     }
   );
@@ -570,13 +591,13 @@ export function createServer(config: ServerConfig): McpServer {
       description: "Get the mean maximal power curve for a specific activity.",
       inputSchema: schema("get_activity_power_curve", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
         })
       ),
       annotations: READ_ONLY,
     },
     async ({ activity_id }) =>
-      json(await client.get(`/activity/${activity_id}/power-curve`))
+      json(await client.get(`/activity/${segment(activity_id)}/power-curve`))
   );
 
   server.registerTool(
@@ -588,7 +609,7 @@ export function createServer(config: ServerConfig): McpServer {
         "Requires a stream to measure and exactly one of duration or distance.",
       inputSchema: schema("get_activity_best_efforts", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
           stream: z
             .string()
             .describe(
@@ -623,7 +644,7 @@ export function createServer(config: ServerConfig): McpServer {
       if (duration !== undefined) params.duration = String(duration);
       if (distance !== undefined) params.distance = String(distance);
       return json(
-        await client.get(`/activity/${activity_id}/best-efforts`, params)
+        await client.get(`/activity/${segment(activity_id)}/best-efforts`, params)
       );
     }
   );
@@ -635,13 +656,13 @@ export function createServer(config: ServerConfig): McpServer {
       description: "Get the weather summary for an activity.",
       inputSchema: schema("get_activity_weather", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
         })
       ),
       annotations: READ_ONLY,
     },
     async ({ activity_id }) =>
-      json(await client.get(`/activity/${activity_id}/weather-summary`))
+      json(await client.get(`/activity/${segment(activity_id)}/weather-summary`))
   );
 
   server.registerTool(
@@ -658,7 +679,7 @@ export function createServer(config: ServerConfig): McpServer {
         "activity without that data returns no buckets.",
       inputSchema: schema("get_activity_histogram", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
           metric: z
             .enum(HISTOGRAM_METRICS)
             .describe(
@@ -670,7 +691,7 @@ export function createServer(config: ServerConfig): McpServer {
     },
     async ({ activity_id, metric }) => {
       const data = await client.get<unknown>(
-        `/activity/${activity_id}/${metric}-histogram`
+        `/activity/${segment(activity_id)}/${metric}-histogram`
       );
       return json({ metric, ...histogram(data) });
     }
@@ -687,7 +708,7 @@ export function createServer(config: ServerConfig): McpServer {
         "editable here.",
       inputSchema: schema("update_activity", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
           name: z.string().optional().describe("Activity title"),
           description: z.string().optional().describe("Activity notes"),
           type: z
@@ -727,7 +748,7 @@ export function createServer(config: ServerConfig): McpServer {
       annotations: UPDATE,
     },
     async ({ activity_id, ...fields }) =>
-      json(await client.put(`/activity/${activity_id}`, compactBody(fields)))
+      json(await client.put(`/activity/${segment(activity_id)}`, compactBody(fields)))
   );
 
   // ── Power & Performance ────────────────────────────────────────────────────
@@ -1020,7 +1041,7 @@ export function createServer(config: ServerConfig): McpServer {
         'pass fields ["*"] (or name workout_doc) to get the structured workout.',
       inputSchema: schema("get_event", () =>
         z.object({
-          event_id: z.string().describe("The event ID"),
+          event_id: numericId("The event ID"),
           fields: fieldsParam(EVENT_SUMMARY_FIELDS, 62),
         })
       ),
@@ -1028,7 +1049,7 @@ export function createServer(config: ServerConfig): McpServer {
     },
     async ({ event_id, fields }) => {
       const data = await client.get(
-        `/athlete/${client.athleteId}/events/${event_id}`
+        `/athlete/${client.athleteId}/events/${segment(event_id)}`
       );
       return json(projectFields(data, fields, EVENT_SUMMARY_FIELDS));
     }
@@ -1113,6 +1134,9 @@ export function createServer(config: ServerConfig): McpServer {
         "`category` is one-way for some kinds: once an event is TARGET or PLAN " +
         "the API refuses to change it again (422), so delete and recreate " +
         "instead. " +
+        (DELETE_MODE === "safe"
+          ? "In delete mode `safe`, a past event cannot be moved to today or later. "
+          : "") +
         EVENT_CATEGORY_HELP,
       inputSchema: schema("update_event", () =>
         z.object({
@@ -1148,13 +1172,28 @@ export function createServer(config: ServerConfig): McpServer {
       ),
       annotations: UPDATE,
     },
-    async ({ event_id, ...fields }) =>
-      json(
+    async ({ event_id, ...fields }) => {
+      if (DELETE_MODE === "safe" && fields.start_date_local !== undefined) {
+        // Otherwise a past event could be moved to the future and then
+        // deleted, which is exactly what safe mode exists to prevent.
+        const date = await storedEventDate(event_id);
+        const today = localToday(config.timeZone);
+        if (date < today && fields.start_date_local.slice(0, 10) >= today) {
+          throw new Error(
+            `Refusing to move event ${event_id} from ${date} to ` +
+              `${fields.start_date_local.slice(0, 10)}: in delete mode "safe" a ` +
+              `past event cannot be rescheduled to today or later, since that ` +
+              `would make it deletable. Move it to another past date instead.`
+          );
+        }
+      }
+      return json(
         await client.put(
-          `/athlete/${client.athleteId}/events/${event_id}`,
+          `/athlete/${client.athleteId}/events/${segment(event_id)}`,
           compactBody(fields)
         )
-      )
+      );
+    }
   );
 
   if (DELETE_MODE !== "none") {
@@ -1182,12 +1221,9 @@ export function createServer(config: ServerConfig): McpServer {
         if (DELETE_MODE === "safe") {
           // Read before deleting, so "is this in the past" is answered by the
           // calendar rather than by whatever the caller believes.
-          const existing = await client.get<{ start_date_local?: string }>(
-            `/athlete/${client.athleteId}/events/${event_id}`
-          );
-          const date = existing?.start_date_local?.slice(0, 10);
+          const date = await storedEventDate(event_id);
           const today = localToday(config.timeZone);
-          if (date && date < today) {
+          if (date < today) {
             throw new Error(
               `Refusing to delete event ${event_id}: it is dated ${date}, before ` +
                 `today (${today}), and the delete mode is "safe". Set ` +
@@ -1197,7 +1233,7 @@ export function createServer(config: ServerConfig): McpServer {
           }
         }
         return json(
-          await client.delete(`/athlete/${client.athleteId}/events/${event_id}`)
+          await client.delete(`/athlete/${client.athleteId}/events/${segment(event_id)}`)
         );
       }
     );
@@ -1223,13 +1259,13 @@ export function createServer(config: ServerConfig): McpServer {
       description: "Get a specific workout from the library by ID.",
       inputSchema: schema("get_workout", () =>
         z.object({
-          workout_id: z.string().describe("The workout ID"),
+          workout_id: numericId("The workout ID"),
         })
       ),
       annotations: READ_ONLY,
     },
     async ({ workout_id }) =>
-      json(await client.get(`/athlete/${client.athleteId}/workouts/${workout_id}`))
+      json(await client.get(`/athlete/${client.athleteId}/workouts/${segment(workout_id)}`))
   );
 
   server.registerTool(
@@ -1304,7 +1340,7 @@ export function createServer(config: ServerConfig): McpServer {
         "workout rather than a fragment.",
       inputSchema: schema("update_workout", () =>
         z.object({
-          workout_id: z.string().describe("The workout ID"),
+          workout_id: numericId("The workout ID"),
           name: z.string().optional().describe("Workout name"),
           description: z
             .string()
@@ -1343,7 +1379,7 @@ export function createServer(config: ServerConfig): McpServer {
     async ({ workout_id, ...fields }) =>
       json(
         await client.put(
-          `/athlete/${client.athleteId}/workouts/${workout_id}`,
+          `/athlete/${client.athleteId}/workouts/${segment(workout_id)}`,
           compactBody(fields)
         )
       )
@@ -1361,7 +1397,7 @@ export function createServer(config: ServerConfig): McpServer {
           "allowed in both `safe` and `full` delete modes.",
         inputSchema: schema("delete_workout", () =>
           z.object({
-            workout_id: z.string().describe("The workout ID"),
+            workout_id: numericId("The workout ID"),
           })
         ),
         annotations: DELETE,
@@ -1369,7 +1405,7 @@ export function createServer(config: ServerConfig): McpServer {
       async ({ workout_id }) =>
         json(
           await client.delete(
-            `/athlete/${client.athleteId}/workouts/${workout_id}`
+            `/athlete/${client.athleteId}/workouts/${segment(workout_id)}`
           )
         )
     );
@@ -1458,13 +1494,13 @@ export function createServer(config: ServerConfig): McpServer {
       description: "Get a specific route by ID.",
       inputSchema: schema("get_route", () =>
         z.object({
-          route_id: z.string().describe("The route ID"),
+          route_id: numericId("The route ID"),
         })
       ),
       annotations: READ_ONLY,
     },
     async ({ route_id }) =>
-      json(await client.get(`/athlete/${client.athleteId}/routes/${route_id}`))
+      json(await client.get(`/athlete/${client.athleteId}/routes/${segment(route_id)}`))
   );
 
   // ── Resources ──────────────────────────────────────────────────────────────

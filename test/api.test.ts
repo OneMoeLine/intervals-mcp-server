@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_BASE_URL, IntervalsClient, retryDelayMs } from "../src/api.js";
+import { DEFAULT_BASE_URL, IntervalsClient, retryDelayMs, segment } from "../src/api.js";
 import { startFakeServer, type FakeServer } from "./helpers/fake-server.js";
 
 let fake: FakeServer;
@@ -306,5 +306,39 @@ describe("error bodies", () => {
     await expect(clientFor(fake).get("/x")).rejects.toThrow(
       /<html> <body> Gateway problem <\/body> <\/html>/
     );
+  });
+});
+
+describe("route binding", () => {
+  it("refuses a path that dot segments, a query or a fragment would rewrite, before sending anything", async () => {
+    const client = clientFor(fake);
+    for (const path of [
+      "/athlete/i1/workouts/../events/5",
+      "/athlete/i1/workouts/%2e%2e/events/5",
+      "/athlete/i1/workouts/.%2E/events/5",
+      "/activity/../athlete/i1",
+      "/activity/i1#/intervals",
+      "/activity/i1?x=/intervals",
+      "/athlete/i1/workouts/./9",
+    ]) {
+      await expect(client.get(path), path).rejects.toThrow(/unexpected API path/);
+    }
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("refuses the same on a base URL that carries a path", async () => {
+    const client = clientFor({ baseUrl: `${fake.baseUrl}/api/v1` });
+    await expect(client.delete("/athlete/i1/workouts/../events/5")).rejects.toThrow(
+      /unexpected API path/
+    );
+    await client.get("/athlete/i1/workouts/9");
+    expect(fake.requests.map((r) => r.path)).toEqual(["/api/v1/athlete/i1/workouts/9"]);
+  });
+
+  it("segment() encodes, and refuses the segments encoding leaves alone", () => {
+    expect(segment("i123")).toBe("i123");
+    expect(segment(42)).toBe("42");
+    expect(segment("a/b")).toBe("a%2Fb");
+    for (const bad of ["", ".", ".."]) expect(() => segment(bad)).toThrow();
   });
 });

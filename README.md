@@ -207,7 +207,7 @@ npm run dev:worker               # http://localhost:8787/mcp
 npm test
 ```
 
-144 [vitest](https://vitest.dev) tests, about 4 seconds. **No credentials and
+188 [vitest](https://vitest.dev) tests, about 4 seconds. **No credentials and
 no network access are needed** — nothing in the suite contacts Intervals.icu.
 `npm test` builds first (via `pretest`), because the protocol tests spawn the
 compiled `dist/index.js`. `npm run test:watch` reruns on change, and
@@ -314,11 +314,17 @@ curve are the curve, and `distance` against `values` on a pace curve.
 
 **Credentials are withheld.** The athlete record carries a slot for the
 account's own API key (`icu_api_key`) and a shareable `icu_friend_invite_token`.
-Both are replaced with a visible marker on every athlete response, including
-when you ask for `fields: ["*"]`, so neither can reach a model's context, a
-transcript or a log. `email` and `icu_date_of_birth` are personal but not
+Both are replaced with a visible marker, at any depth, on every tool result -
+not just athlete responses, and including when you ask for `fields: ["*"]` - so
+neither can reach a model's context, a transcript or a log. `email` and `icu_date_of_birth` are personal but not
 credentials, so they are merely absent from the default field set and can still
 be requested by name.
+
+**IDs are validated locally.** Activity IDs must look like `i12345678` (or a
+bare number); event, workout and route IDs must be numeric. An ID is spliced into
+an API path, so a slash, dot, `%`, `?` or `#` is refused before any request is
+made, and the client also refuses any path the URL parser would rewrite. Without
+this, `delete_workout` with `../events/5` would reach an event.
 
 **Dates are validated locally.** Date inputs must be `YYYY-MM-DD`
 (`create_event` and `update_event` also accept `YYYY-MM-DDTHH:MM:SS`). Malformed values fail
@@ -353,7 +359,7 @@ because a model can set an argument itself:
 
 | Mode | Effect |
 | --- | --- |
-| `safe` (default) | The delete tools are registered, but `delete_event` refuses an event dated before today — it reads the event first and compares. Planning mistakes are removable; training history is not. |
+| `safe` (default) | The delete tools are registered, but `delete_event` refuses an event dated before today — it reads the event first and compares. `update_event` likewise refuses to move a past event to today or later, which would otherwise make it deletable. An event whose date cannot be read is refused rather than assumed to be in the future. Planning mistakes are removable; training history is not. |
 | `full` | Any event can be deleted, past included, with no pre-flight read. |
 | `none` | The delete tools are not registered at all, so no client can see or call them. |
 
