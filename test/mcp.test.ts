@@ -797,13 +797,13 @@ describe("write tools against the fake API", () => {
     const before = fake.requests.length;
     await server.request("tools/call", {
       name: "delete_workout",
-      arguments: { workout_id: "w9" },
+      arguments: { workout_id: "9" },
     });
 
     const sent = fake.requests.slice(before);
     expect(sent).toHaveLength(1);
     expect(sent[0].method).toBe("DELETE");
-    expect(sent[0].path).toBe("/athlete/i1/workouts/w9");
+    expect(sent[0].path).toBe("/athlete/i1/workouts/9");
   });
 
   it("trims folder records on list_folders", async () => {
@@ -998,6 +998,122 @@ describe("get_fitness_chart", () => {
   });
 });
 
+describe("resource ID validation", () => {
+  /** Every tool that splices a caller-supplied ID into an API path, with the
+   *  other arguments it needs to otherwise pass validation. */
+  const RAW_ID_TOOLS: [string, string, Record<string, unknown>][] = [
+    ["get_activity", "activity_id", {}],
+    ["get_activity_intervals", "activity_id", {}],
+    ["get_activity_streams", "activity_id", {}],
+    ["get_activity_power_curve", "activity_id", {}],
+    ["get_activity_best_efforts", "activity_id", { stream: "watts" }],
+    ["get_activity_weather", "activity_id", {}],
+    ["get_activity_histogram", "activity_id", { metric: "power" }],
+    ["update_activity", "activity_id", { name: "x" }],
+    ["get_event", "event_id", {}],
+    ["get_workout", "workout_id", {}],
+    ["update_workout", "workout_id", { name: "x" }],
+    ["delete_workout", "workout_id", {}],
+    ["get_route", "route_id", {}],
+  ];
+
+  /** Traversal, and query/fragment delimiters that would cut off the rest of
+   *  the path - plain and percent-encoded. */
+  const HOSTILE_IDS = [
+    "../events/5",
+    "../../i1",
+    "../athlete/i1",
+    "..",
+    ".",
+    "%2e%2e",
+    "%2E%2E%2Fevents%2F5",
+    ".%2e/events/5",
+    "5/../../events/6",
+    "5%2f..%2f..%2fevents%2f6",
+    "5#",
+    "5%23",
+    "5?x=1",
+    "5%3Fx=1",
+    "5\\..\\events",
+    "",
+  ];
+
+  for (const [tool, arg, extra] of RAW_ID_TOOLS) {
+    it(`${tool} rejects traversal and delimiters before any HTTP request`, async () => {
+      const before = fake.requests.length;
+      for (const id of HOSTILE_IDS) {
+        const res = await server.request("tools/call", {
+          name: tool,
+          arguments: { ...extra, [arg]: id },
+        });
+        expect(res.result?.isError ?? Boolean(res.error), `${tool} ${id}`).toBe(true);
+      }
+      expect(fake.requests.length).toBe(before);
+    });
+  }
+
+  it("delete_workout can never reach an event", async () => {
+    fake.replyWith({ body: {} });
+    const before = fake.requests.length;
+    for (const id of ["../events/5", "%2e%2e/events/5", "..%2Fevents%2F5"]) {
+      await server.request("tools/call", {
+        name: "delete_workout",
+        arguments: { workout_id: id },
+      });
+    }
+    expect(fake.requests.slice(before)).toEqual([]);
+  });
+
+  it("still accepts the real ID formats", async () => {
+    fake.replyWith({ body: { id: 1 } });
+    const cases: [string, Record<string, unknown>, string][] = [
+      ["get_activity", { activity_id: "i12345678" }, "/activity/i12345678"],
+      ["get_activity", { activity_id: "12345678" }, "/activity/12345678"],
+      ["get_workout", { workout_id: "9" }, "/athlete/i1/workouts/9"],
+      ["get_route", { route_id: "12" }, "/athlete/i1/routes/12"],
+      ["get_event", { event_id: "42" }, "/athlete/i1/events/42"],
+    ];
+    for (const [name, args, path] of cases) {
+      const res = await server.request("tools/call", { name, arguments: args });
+      expect(res.result.isError, name).toBeFalsy();
+      expect(fake.requests[fake.requests.length - 1].path).toBe(path);
+    }
+  });
+});
+
+describe("credential redaction", () => {
+  const leaky = {
+    id: "i1",
+    name: "Someone",
+    icu_api_key: "a-real-secret-key",
+    icu_friend_invite_token: "an-invite-token",
+    nested: { icu_api_key: "another-secret" },
+  };
+
+  const READERS: [string, Record<string, unknown>][] = [
+    ["get_athlete", { fields: ["*"] }],
+    ["get_athlete_profile", {}],
+    ["get_activity", { activity_id: "i1", fields: ["*"] }],
+    ["get_workout", { workout_id: "9" }],
+    ["get_route", { route_id: "12" }],
+    ["get_event", { event_id: "42", fields: ["*"] }],
+    ["list_workouts", {}],
+    ["list_routes", {}],
+    ["list_gear", {}],
+  ];
+
+  for (const [name, args] of READERS) {
+    it(`${name} never returns a credential the API supplies`, async () => {
+      fake.replyWith({ body: leaky });
+      const res = await server.request("tools/call", { name, arguments: args });
+      const text = res.result.content[0].text as string;
+      expect(text).not.toContain("a-real-secret-key");
+      expect(text).not.toContain("an-invite-token");
+      expect(text).not.toContain("another-secret");
+    });
+  }
+});
+
 describe("delete modes", () => {
   it("refuses a past event in the default safe mode, and sends no DELETE", async () => {
     fake.replyWith({
@@ -1034,6 +1150,88 @@ describe("delete modes", () => {
     fake.replyWith({ status: 200, body: {} });
   });
 
+  it("refuses to move a past event to the future in safe mode, so it cannot then be deleted", async () => {
+    // The calendar as the fake holds it: one past event, which only a PUT
+    // that got through could move.
+    let stored = "2020-01-01T09:00:00";
+    fake.replyUsing((req) => {
+      if (req.method === "PUT") stored = JSON.parse(req.body).start_date_local;
+      return { body: { id: 8, start_date_local: stored } };
+    });
+    const before = fake.requests.length;
+
+    const update = await server.request("tools/call", {
+      name: "update_event",
+      arguments: { event_id: 8, start_date_local: "2999-01-01T09:00:00" },
+    });
+    expect(update.result.isError).toBe(true);
+    expect(update.result.content[0].text).toMatch(/cannot be rescheduled/);
+
+    const del = await server.request("tools/call", {
+      name: "delete_event",
+      arguments: { event_id: 8 },
+    });
+    expect(del.result.isError).toBe(true);
+
+    const sent = fake.requests.slice(before);
+    expect(sent.map((r) => r.method)).toEqual(["GET", "GET"]);
+    fake.replyWith({ status: 200, body: {} });
+  });
+
+  it("still lets safe mode move a past event to another past date, or a future one anywhere", async () => {
+    fake.replyUsing((req) =>
+      req.method === "GET" && req.path.endsWith("/9")
+        ? { body: { id: 9, start_date_local: "2020-01-01T09:00:00" } }
+        : req.method === "GET"
+          ? { body: { id: 10, start_date_local: "2999-01-01T09:00:00" } }
+          : { body: {} }
+    );
+    const before = fake.requests.length;
+    const past = await server.request("tools/call", {
+      name: "update_event",
+      arguments: { event_id: 9, start_date_local: "2020-01-02" },
+    });
+    const future = await server.request("tools/call", {
+      name: "update_event",
+      arguments: { event_id: 10, start_date_local: "2999-02-01" },
+    });
+    expect(past.result.isError).toBeFalsy();
+    expect(future.result.isError).toBeFalsy();
+    const sent = fake.requests.slice(before);
+    expect(sent.map((r) => r.method)).toEqual(["GET", "PUT", "GET", "PUT"]);
+    fake.replyWith({ status: 200, body: {} });
+  });
+
+  it("does not read the event first when the date is not changing", async () => {
+    fake.replyWith({ body: {} });
+    const before = fake.requests.length;
+    await server.request("tools/call", {
+      name: "update_event",
+      arguments: { event_id: 11, name: "Renamed" },
+    });
+    expect(fake.requests.slice(before).map((r) => r.method)).toEqual(["PUT"]);
+  });
+
+  it("fails closed in safe mode when the event's date cannot be read", async () => {
+    fake.replyUsing((req) =>
+      req.method === "GET" ? { body: { id: 12 } } : { body: {} }
+    );
+    const before = fake.requests.length;
+    const update = await server.request("tools/call", {
+      name: "update_event",
+      arguments: { event_id: 12, start_date_local: "2999-01-01" },
+    });
+    const del = await server.request("tools/call", {
+      name: "delete_event",
+      arguments: { event_id: 12 },
+    });
+    expect(update.result.isError).toBe(true);
+    expect(del.result.isError).toBe(true);
+    expect(update.result.content[0].text).toMatch(/Could not read the date/);
+    expect(fake.requests.slice(before).map((r) => r.method)).toEqual(["GET", "GET"]);
+    fake.replyWith({ status: 200, body: {} });
+  });
+
   it("deletes a past event in full mode, without reading it first", async () => {
     const { server: s } = await ServerProcess.start({
       INTERVALS_BASE_URL: fake.baseUrl,
@@ -1049,6 +1247,14 @@ describe("delete modes", () => {
     const sent = fake.requests.slice(before);
     expect(sent.map((r) => r.method)).toEqual(["DELETE"]);
     expect(sent[0].path).toBe("/athlete/i1/events/7");
+
+    // Full mode does not guard rescheduling either: nothing is protected.
+    const beforeUpdate = fake.requests.length;
+    await s.request("tools/call", {
+      name: "update_event",
+      arguments: { event_id: 7, start_date_local: "2999-01-01" },
+    });
+    expect(fake.requests.slice(beforeUpdate).map((r) => r.method)).toEqual(["PUT"]);
     await s.stop();
   }, 20_000);
 

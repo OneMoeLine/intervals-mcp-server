@@ -149,16 +149,19 @@ export const REDACTED_ATHLETE_FIELDS = [
 
 export const REDACTION_MARKER = "[redacted by intervals-mcp-server]";
 
-/** Replace credential-shaped fields with a marker. A marker rather than a
- *  deletion, so it is visible that something was withheld on purpose. */
+/** Replace credential-shaped fields with a marker, at any depth. A marker
+ *  rather than a deletion, so it is visible that something was withheld on
+ *  purpose. Every tool result passes through this, so a credential that turns
+ *  up in an unexpected response is still withheld. */
 export function redact(data: unknown, keys: string[]): unknown {
   if (!data || typeof data !== "object") return data;
   if (Array.isArray(data)) return data.map((r) => redact(r, keys));
-  const out: Record<string, unknown> = { ...(data as Record<string, unknown>) };
-  for (const k of keys) {
-    if (k in out && out[k] !== null && out[k] !== undefined) {
-      out[k] = REDACTION_MARKER;
-    }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+    out[k] =
+      keys.includes(k) && v !== null && v !== undefined
+        ? REDACTION_MARKER
+        : redact(v, keys);
   }
   return out;
 }
@@ -353,6 +356,23 @@ export function projectNested(
 
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export const DATETIME_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?$/;
+
+/** Resource IDs are spliced into API paths, so each is held to its real
+ *  format: a slash, dot, `%`, `?` or `#` could otherwise steer the request to a
+ *  different endpoint. Activity IDs are Intervals.icu's own ("i12345678") or a
+ *  bare number for some synced activities; events, workouts and routes are
+ *  numeric. */
+export const ACTIVITY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const NUMERIC_ID_RE = /^\d{1,20}$/;
+
+export const activityId = () =>
+  z
+    .string()
+    .regex(ACTIVITY_ID_RE, "Must be an activity ID such as i12345678")
+    .describe("The activity ID");
+
+export const numericId = (description: string) =>
+  z.string().regex(NUMERIC_ID_RE, "Must be a numeric ID").describe(description);
 
 /** Validate dates up front so a malformed value fails with an actionable
  *  message instead of a confusing 422 from the API. */

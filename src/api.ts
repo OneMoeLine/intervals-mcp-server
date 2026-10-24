@@ -36,6 +36,19 @@ export function retryDelayMs(res: Response | undefined, attempt: number): number
   return Math.min(500 * 2 ** attempt, 4_000);
 }
 
+/** Encode one caller-supplied path segment. Handlers validate IDs against
+ *  their real format first; this is the backstop. `encodeURIComponent` alone
+ *  leaves `.` and `..` as they are, and the URL parser would resolve those as
+ *  dot segments - walking out of the intended endpoint - so they are refused
+ *  outright. */
+export function segment(value: string | number): string {
+  const text = String(value);
+  if (text === "" || text === "." || text === "..") {
+    throw new Error(`Invalid path segment: ${JSON.stringify(text)}`);
+  }
+  return encodeURIComponent(text);
+}
+
 export interface IntervalsClientOptions {
   /** API root. Defaults to `INTERVALS_BASE_URL` if set, else the live
    *  Intervals.icu API. */
@@ -61,8 +74,10 @@ export class IntervalsClient {
     this.authHeader =
       "Basic " + btoa(`API_KEY:${apiKey}`);
     this.athleteId = athleteId;
-    this.baseUrl =
-      options.baseUrl ?? process.env.INTERVALS_BASE_URL ?? DEFAULT_BASE_URL;
+    // Without a trailing slash, so `${baseUrl}${path}` never doubles one up.
+    this.baseUrl = (
+      options.baseUrl ?? process.env.INTERVALS_BASE_URL ?? DEFAULT_BASE_URL
+    ).replace(/\/+$/, "");
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.retryDelay = options.retryDelay ?? retryDelayMs;
   }
@@ -74,6 +89,14 @@ export class IntervalsClient {
     body?: unknown
   ): Promise<T> {
     const url = new URL(`${this.baseUrl}${path}`);
+    // The URL parser resolves dot segments (encoded ones too) and splits off
+    // `?` and `#`, any of which would swap the endpoint the handler meant for
+    // another one under the same credential. Refuse, before the credential is
+    // attached, any path that does not survive parsing unchanged.
+    const root = new URL(this.baseUrl).pathname.replace(/\/$/, "");
+    if (url.pathname !== `${root}${path}` || url.search || url.hash) {
+      throw new Error(`Refusing request to an unexpected API path: ${path}`);
+    }
     if (params) {
       for (const [k, v] of Object.entries(params)) {
         url.searchParams.set(k, v);
