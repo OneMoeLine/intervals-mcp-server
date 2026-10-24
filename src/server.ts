@@ -14,6 +14,7 @@ import {
   HR_CURVE_SUMMARY_FIELDS,
   INTERVAL_SEARCH_SUMMARY_FIELDS,
   INTERVAL_SUMMARY_FIELDS,
+  PACE_RE,
   PACE_CURVE_SUMMARY_FIELDS,
   POWER_CURVE_SUMMARY_FIELDS,
   REDACTED_ATHLETE_FIELDS,
@@ -22,6 +23,8 @@ import {
   downsampleStreams,
   fieldsParam,
   fitnessSeries,
+  paceToSpeed,
+  pickFields,
   histogram,
   isoDate,
   isoDateTime,
@@ -46,7 +49,7 @@ const schemas = new Map<string, z.ZodObject>();
 
 /** A tool's input schema, built once per process and reused by every server
  *  after the first. The hosted Worker builds a server per request, and
- *  constructing the 35 zod schemas costs more CPU than the rest of a request
+ *  constructing the 36 zod schemas costs more CPU than the rest of a request
  *  put together. Keyed by tool name: no schema depends on the config. */
 function schema<T extends z.ZodObject>(name: string, build: () => T): T {
   let cached = schemas.get(name) as T | undefined;
@@ -200,6 +203,126 @@ export function createServer(config: ServerConfig): McpServer {
           REDACTED_ATHLETE_FIELDS
         )
       )
+  );
+
+  server.registerTool(
+    "update_sport_settings",
+    {
+      title: "Update sport settings",
+      description:
+        "Change the thresholds and zones for one sport: FTP, threshold HR, max HR, " +
+        "threshold pace, W', and the zone boundaries. Only supply what should " +
+        "change. Settings are shared by a group of sport types (Ride covers " +
+        "VirtualRide and GravelRide, Run covers TrailRun), so naming any type in " +
+        "the group updates them all. This changes how future activities are " +
+        "scored; activities already recorded keep the zones and load they were " +
+        "given. Returns the changed fields before and after.",
+      inputSchema: schema("update_sport_settings", () =>
+        z.object({
+          sport: z
+            .string()
+            .describe("A sport type in the group to update, e.g. Ride, Run, Swim"),
+          ftp: z.number().int().positive().optional().describe("FTP in watts"),
+          indoor_ftp: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe("Indoor FTP in watts, where it differs from outdoor"),
+          w_prime: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe("W' (anaerobic work capacity) in joules"),
+          lthr: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe("Threshold (lactate threshold) heart rate in bpm"),
+          max_hr: z.number().int().positive().optional().describe("Max HR in bpm"),
+          threshold_pace: z
+            .string()
+            .regex(PACE_RE)
+            .optional()
+            .describe(
+              'Threshold pace as minutes:seconds per unit: "3:56/km", "6:20/mi" ' +
+                'or "1:45/100m". Converted to the m/s the API stores.'
+            ),
+          power_zones: z
+            .array(z.number())
+            .optional()
+            .describe(
+              "Upper bound of each power zone as % of FTP, ascending, last 999 " +
+                "e.g. [55, 75, 90, 105, 120, 150, 999]"
+            ),
+          hr_zones: z
+            .array(z.number())
+            .optional()
+            .describe(
+              "Upper bound of each HR zone in bpm, ascending, last equal to max HR"
+            ),
+          pace_zones: z
+            .array(z.number())
+            .optional()
+            .describe(
+              "Upper bound of each pace zone as % of threshold pace, ascending, " +
+                "last 999"
+            ),
+          recalc_hr_zones: z
+            .boolean()
+            .optional()
+            .describe(
+              "Recalculate HR zones from the new threshold or max HR. Defaults to " +
+                "true, or false when hr_zones is given."
+            ),
+        })
+      ),
+      annotations: UPDATE,
+    },
+    async ({ sport, threshold_pace, recalc_hr_zones, ...rest }) => {
+      const changes: Record<string, unknown> = compactBody(rest);
+      if (threshold_pace !== undefined) {
+        changes.threshold_pace = paceToSpeed(threshold_pace);
+      }
+      if (Object.keys(changes).length === 0) {
+        throw new Error("Nothing to change: supply at least one setting.");
+      }
+
+      const all = await client.get<Array<{ id?: number; types?: string[] }>>(
+        `/athlete/${client.athleteId}/sport-settings`
+      );
+      const wanted = sport.toLowerCase();
+      const current = (Array.isArray(all) ? all : []).find((s) =>
+        s.types?.some((t) => t.toLowerCase() === wanted)
+      );
+      if (current?.id === undefined) {
+        const known = (Array.isArray(all) ? all : [])
+          .map((s) => s.types?.join("/"))
+          .filter(Boolean)
+          .join(", ");
+        throw new Error(
+          `No sport settings cover "${sport}". The athlete has: ${known || "none"}.`
+        );
+      }
+
+      const recalc = recalc_hr_zones ?? rest.hr_zones === undefined;
+      const updated = await client.request<Record<string, unknown>>(
+        "PUT",
+        `/athlete/${client.athleteId}/sport-settings/${current.id}`,
+        { recalcHrZones: String(recalc) },
+        changes
+      );
+      const keys = Object.keys(changes);
+      if (recalc && !keys.includes("hr_zones")) keys.push("hr_zones");
+      return json({
+        id: current.id,
+        types: current.types,
+        before: pickFields(current, keys),
+        after: pickFields(updated, keys),
+      });
+    }
   );
 
   // ── Activities ─────────────────────────────────────────────────────────────

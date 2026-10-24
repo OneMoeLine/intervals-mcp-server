@@ -7,6 +7,7 @@ import { ACTIVITY_SUMMARY_FIELDS } from "../src/transform.js";
 const EXPECTED_TOOLS = [
   "get_athlete",
   "get_athlete_profile",
+  "update_sport_settings",
   "list_activities",
   "get_activity",
   "search_activities",
@@ -54,6 +55,7 @@ const EXPECTED_WRITERS = [
   "delete_workout",
   "update_activity",
   "update_event",
+  "update_sport_settings",
   "update_wellness",
   "update_workout",
 ];
@@ -102,8 +104,8 @@ describe("startup", () => {
 });
 
 describe("tools/list", () => {
-  it("exposes all 35 tools", () => {
-    expect(tools).toHaveLength(35);
+  it("exposes all 36 tools", () => {
+    expect(tools).toHaveLength(36);
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());
   });
 
@@ -168,7 +170,7 @@ describe("tools/list", () => {
     }
   });
 
-  it("reports exactly nine writers, and they are the expected nine", () => {
+  it("reports exactly ten writers, and they are the expected ten", () => {
     const writers = tools
       .filter((t) => t.annotations?.readOnlyHint === false)
       .map((t) => t.name)
@@ -624,6 +626,70 @@ describe("tools/call against the fake API", () => {
 });
 
 describe("write tools against the fake API", () => {
+  const SPORT_SETTINGS = [
+    { id: 11, types: ["Ride", "VirtualRide"], ftp: 261, lthr: 172, hr_zones: [140, 172] },
+    { id: 12, types: ["Run", "TrailRun"], threshold_pace: 4.0, lthr: 176 },
+  ];
+
+  it("finds the settings by sport type and PUTs only the change", async () => {
+    fake.replyUsing((req) =>
+      req.method === "GET"
+        ? { body: SPORT_SETTINGS }
+        : { body: { ...SPORT_SETTINGS[1], ...JSON.parse(req.body) } }
+    );
+    const res = await server.request("tools/call", {
+      name: "update_sport_settings",
+      arguments: { sport: "trailrun", threshold_pace: "3:56/km" },
+    });
+
+    const put = fake.requests[fake.requests.length - 1];
+    expect(put.method).toBe("PUT");
+    expect(put.path).toBe("/athlete/i1/sport-settings/12");
+    expect(put.query).toEqual({ recalcHrZones: "true" });
+    expect(JSON.parse(put.body)).toEqual({ threshold_pace: 4.2373 });
+    const payload = JSON.parse(res.result.content[0].text);
+    expect(payload).toMatchObject({
+      id: 12,
+      before: { threshold_pace: 4.0 },
+      after: { threshold_pace: 4.2373 },
+    });
+  });
+
+  it("leaves hr zones alone when they are supplied explicitly", async () => {
+    fake.replyUsing((req) =>
+      req.method === "GET" ? { body: SPORT_SETTINGS } : { body: SPORT_SETTINGS[0] }
+    );
+    await server.request("tools/call", {
+      name: "update_sport_settings",
+      arguments: { sport: "Ride", ftp: 265, hr_zones: [145, 175] },
+    });
+    const put = fake.requests[fake.requests.length - 1];
+    expect(put.query).toEqual({ recalcHrZones: "false" });
+    expect(JSON.parse(put.body)).toEqual({ ftp: 265, hr_zones: [145, 175] });
+  });
+
+  it("names the sports it has when asked for one it does not", async () => {
+    fake.replyWith({ body: SPORT_SETTINGS });
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "update_sport_settings",
+      arguments: { sport: "Rowing", ftp: 200 },
+    });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toMatch(/Ride\/VirtualRide, Run\/TrailRun/);
+    expect(fake.requests.length).toBe(before + 1); // the read, and no PUT
+  });
+
+  it("rejects a sport settings update with nothing in it", async () => {
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "update_sport_settings",
+      arguments: { sport: "Ride" },
+    });
+    expect(res.result.isError).toBe(true);
+    expect(fake.requests.length).toBe(before);
+  });
+
   it("rejects a category the API does not have, before any HTTP call", async () => {
     const before = fake.requests.length;
     const res = await server.request("tools/call", {
