@@ -85,8 +85,9 @@ Then **`get_activity_histogram`** — 34 tools, 25 read-only. One tool with a
 endpoints differ only by path. Each returns a bare array of buckets; the spec
 documents more per bucket than `min`, `max` and `secs`, but none of the
 histogram endpoints fill the rest in, so only those three are kept and empty
-buckets are dropped. Not yet exercised live: the pace and GAP bucket units
-(expected m/s) still need confirming against a real run.
+buckets are dropped. Checked live on 2026-10-24: pace and GAP bounds are
+speeds in m/s (a run averaging 3.393 m/s peaks in the 3.32-3.41 bucket, and
+`total_secs` matches its moving time), and power buckets are 25 W wide.
 
 Then **`search_intervals`** — 35 tools, 26 read-only. Wraps
 `/activities/interval-search`, which answers 422 unless `minSecs`, `maxSecs`,
@@ -95,45 +96,51 @@ wire as explicit wide defaults (0, 86400, 0, 999). It returns whole activity
 records; the match itself is in `interval_summary`, so the default projection
 keeps that plus a few identifying fields. The endpoint takes no date range.
 
+Then **`update_sport_settings`** — 36 tools, 10 writers. FTP, indoor FTP, W',
+threshold and max HR, threshold pace and the three zone arrays, for the
+settings group that contains a named sport type (the group is found by
+reading `/sport-settings` first, so "Ride" and "GravelRide" land on the same
+record). Threshold pace is taken as "3:56/km", "6:20/mi" or "1:45/100m" and
+converted here: the API stores it as m/s for every sport, swimming included,
+and quietly accepts a pace where the speed belongs. `recalcHrZones` defaults
+to true unless explicit `hr_zones` are given. Deliberately left out:
+`sport-settings/{id}/apply`, which re-scores past activities with the new
+zones. That rewrites history, so it waits for a decision on how the delete
+gate should cover it.
+
 ## Tier 1 — next up
 
-1. **Sport settings writes** — FTP, FTHR, threshold pace, zones per sport, via
-   `/athlete/{athleteId}/sport-settings`. Readable today only through
-   `get_athlete fields:["sportSettings"]` and not writable, so "bump my FTP to
-   265" is still a trip to the website. Note `sport-settings/{id}/apply`
-   rewrites zones on *past* activities — that one is destructive and belongs
-   behind the delete gate.
-2. **Gear writes and maintenance reminders** — small, self-contained, and the
+1. **Gear writes and maintenance reminders** — small, self-contained, and the
    kind of thing people actually want nagging about.
-3. **Calendar bulk operations** — `events/bulk`, `duplicate-events` (copy a
+2. **Calendar bulk operations** — `events/bulk`, `duplicate-events` (copy a
    session N times with spacing), `events/apply-plan` (drop a folder onto the
    calendar from a date). Hand-building a 12-week block one `create_event` at a
    time burns context; `apply-plan` plus `create_folder` would make plans a
    two-call operation.
-4. **Activity messages** — read and post comments on an activity. The coach
+3. **Activity messages** — read and post comments on an activity. The coach
    feedback loop; also the only write path that talks to another human, so it
    deserves an explicit confirmation story.
 
 ## Tier 2 — nice to have
 
-5. **Annual training plan** — periodization targets and week notes.
-6. **`get_upcoming_workouts`** — the next N planned sessions with their IDs.
+4. **Annual training plan** — periodization targets and week notes.
+5. **`get_upcoming_workouts`** — the next N planned sessions with their IDs.
    Possibly just better defaults on `list_events` rather than a new tool.
-7. **`get_activities_around`** — the activities surrounding a given one, for
+6. **`get_activities_around`** — the activities surrounding a given one, for
    "what was I doing the week of that breakthrough ride".
-8. **Multi-athlete / coach support** — `list_athletes` with access levels, and
+7. **Multi-athlete / coach support** — `list_athletes` with access levels, and
     an optional `athlete_id` on the read tools. The athlete is currently fixed
     by `INTERVALS_ATHLETE_ID`. This is an architectural change, not a tool:
     worth deciding before the tool count grows further.
-9. **Athlete notes** read/write.
-10. **Custom items** — custom charts, fields, zones, dashboard panels. Large API
+8. **Athlete notes** read/write.
+9. **Custom items** — custom charts, fields, zones, dashboard panels. Large API
     surface, narrow audience; upstream ships a schema resource to make it usable.
-11. **File downloads** — original / FIT / GPX. Awkward over MCP (binary as
+10. **File downloads** — original / FIT / GPX. Awkward over MCP (binary as
     base64 bloats context); only worth it if we return a resource link or write
     to a path rather than inlining bytes.
-12. **Manual and route writes** — `bulk_create_manual_activities` (upsert by
+11. **Manual and route writes** — `bulk_create_manual_activities` (upsert by
     external ID) is how you backfill non-synced training.
-13. **Event deletes beyond one at a time** — `events/bulk-delete` and the
+12. **Event deletes beyond one at a time** — `events/bulk-delete` and the
     `others`/`notBefore` options on the single delete. Deliberately left out of
     the first pass: "delete the event I named" is easy to reason about, "delete
     everything added alongside it" is not.

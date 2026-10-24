@@ -15,6 +15,7 @@ import {
   compactBody,
   fitnessSeries,
   histogram,
+  paceToSpeed,
 } from "../src/transform.js";
 
 /** 0..n-1, so a sampled value doubles as its index in the original. */
@@ -391,6 +392,20 @@ describe("histogram", () => {
     expect(
       histogram([{ min: 400, secs: 30 }, "junk", { min: 0, max: 100, secs: "x" }])
     ).toEqual({ total_secs: 30, buckets: [{ min: 400, max: null, secs: 30 }] });
+  });
+});
+
+describe("paceToSpeed", () => {
+  it("converts per km, per mile and per 100 m to m/s", () => {
+    expect(paceToSpeed("3:56/km")).toBe(4.2373);
+    expect(paceToSpeed("6:20 / mi")).toBe(4.2351);
+    expect(paceToSpeed("2:00/100m")).toBe(0.8333);
+  });
+
+  it("rejects anything that is not minutes:seconds per unit", () => {
+    expect(() => paceToSpeed("236")).toThrow(/not a pace/);
+    expect(() => paceToSpeed("3:75/km")).toThrow(/not a pace/);
+    expect(() => paceToSpeed("0:00/km")).toThrow(/0:00/);
   });
 });
 

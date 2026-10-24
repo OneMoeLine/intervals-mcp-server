@@ -408,6 +408,27 @@ export function downsampleStreams(data: unknown, maxPoints: number): unknown {
   });
 }
 
+/** A pace as people write it: minutes:seconds per km, mile or 100 m. */
+export const PACE_RE = /^\s*(\d{1,2}):([0-5]\d)\s*\/\s*(km|mi|100m)\s*$/i;
+
+const PACE_UNIT_METRES: Record<string, number> = {
+  km: 1000,
+  mi: 1609.344,
+  "100m": 100,
+};
+
+/** "3:56/km" to the speed in m/s that Intervals.icu stores as
+ *  `threshold_pace` for every sport, swimming included. Sending a pace where
+ *  a speed belongs is not rejected - it is stored as a nonsense threshold -
+ *  so the conversion happens here rather than being left to the caller. */
+export function paceToSpeed(pace: string): number {
+  const m = PACE_RE.exec(pace);
+  if (!m) throw new Error(`"${pace}" is not a pace like 3:56/km, 6:20/mi or 1:45/100m.`);
+  const secs = Number(m[1]) * 60 + Number(m[2]);
+  if (secs === 0) throw new Error("A pace of 0:00 is not a threshold.");
+  return Number((PACE_UNIT_METRES[m[3].toLowerCase()] / secs).toFixed(4));
+}
+
 /** The activity histograms, each at `/activity/{id}/{metric}-histogram`. */
 export const HISTOGRAM_METRICS = ["power", "hr", "pace", "gap"] as const;
 
