@@ -30,6 +30,8 @@ const EXPECTED_TOOLS = [
   "get_event",
   "create_event",
   "update_event",
+  "duplicate_events",
+  "apply_plan",
   "delete_event",
   "list_workouts",
   "get_workout",
@@ -48,11 +50,13 @@ const EXPECTED_TOOLS = [
  *  The two delete tools are here because the default delete mode registers
  *  them; "none" takes them away, which has its own test. */
 const EXPECTED_WRITERS = [
+  "apply_plan",
   "create_event",
   "create_folder",
   "create_workout",
   "delete_event",
   "delete_workout",
+  "duplicate_events",
   "update_activity",
   "update_event",
   "update_sport_settings",
@@ -104,8 +108,8 @@ describe("startup", () => {
 });
 
 describe("tools/list", () => {
-  it("exposes all 36 tools", () => {
-    expect(tools).toHaveLength(36);
+  it("exposes all 38 tools", () => {
+    expect(tools).toHaveLength(38);
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());
   });
 
@@ -170,7 +174,7 @@ describe("tools/list", () => {
     }
   });
 
-  it("reports exactly ten writers, and they are the expected ten", () => {
+  it("reports exactly twelve writers, and they are the expected twelve", () => {
     const writers = tools
       .filter((t) => t.annotations?.readOnlyHint === false)
       .map((t) => t.name)
@@ -828,6 +832,54 @@ describe("write tools against the fake API", () => {
     expect(payload[0]).not.toHaveProperty("shareToken");
     expect(payload[0]).not.toHaveProperty("children");
     expect(payload[0]).toMatchObject({ id: 3, name: "Base plan", type: "PLAN" });
+  });
+});
+
+describe("calendar bulk operations", () => {
+  it("duplicates events by whole weeks and trims the copies", async () => {
+    fake.replyWith({
+      body: [
+        { id: 901, name: "VO2 5x4", start_date_local: "2026-11-03T00:00:00", workout_doc: { steps: [] } },
+        { id: 902, name: "VO2 5x4", start_date_local: "2026-11-17T00:00:00", workout_doc: { steps: [] } },
+      ],
+    });
+    const res = await server.request("tools/call", {
+      name: "duplicate_events",
+      arguments: { event_ids: [77], num_copies: 2, weeks_between: 2 },
+    });
+
+    const req = fake.requests[fake.requests.length - 1];
+    expect(req.method).toBe("POST");
+    expect(req.path).toBe("/athlete/i1/duplicate-events");
+    expect(JSON.parse(req.body)).toEqual({ eventIds: [77], numCopies: 2, weeksBetween: 2 });
+    const copies = JSON.parse(res.result.content[0].text);
+    expect(copies.map((e: { id: number }) => e.id)).toEqual([901, 902]);
+    expect(copies[0]).not.toHaveProperty("workout_doc");
+  });
+
+  it("applies a plan from a start date", async () => {
+    fake.replyWith({ body: { created: 12 } });
+    await server.request("tools/call", {
+      name: "apply_plan",
+      arguments: { folder_id: 314, start_date: "2026-11-02" },
+    });
+    const req = fake.requests[fake.requests.length - 1];
+    expect(req.method).toBe("POST");
+    expect(req.path).toBe("/athlete/i1/events/apply-plan");
+    expect(JSON.parse(req.body)).toEqual({
+      folder_id: 314,
+      start_date_local: "2026-11-02T00:00:00",
+    });
+  });
+
+  it("rejects a duplicate with no events, before any HTTP call", async () => {
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "duplicate_events",
+      arguments: { event_ids: [] },
+    });
+    expect(res.result?.isError ?? Boolean(res.error)).toBe(true);
+    expect(fake.requests.length).toBe(before);
   });
 });
 

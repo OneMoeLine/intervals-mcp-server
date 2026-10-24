@@ -5,7 +5,7 @@ An [MCP](https://modelcontextprotocol.io) server that exposes your
 wellness, calendar, workouts, gear and routes — to an MCP client such as Claude.
 
 Runs locally over stdio, or as a hosted multi-user server on Cloudflare Workers
-(see [Hosting it for others](#hosting-it-for-others)). 36 tools — 26 read-only and 10 that write — plus one
+(see [Hosting it for others](#hosting-it-for-others)). 38 tools — 26 read-only and 12 that write — plus one
 resource, the Intervals.icu workout syntax reference. Built on v2 of the MCP
 TypeScript SDK (`@modelcontextprotocol/server`).
 
@@ -224,7 +224,7 @@ Four layers:
   schedule and its cap, per-attempt timeouts and error-body truncation. The
   backoff is injected as zero, so the retry tests do not sleep.
 - **`test/mcp.test.ts`** — the real server binary over stdio: `initialize`, then
-  `tools/list` asserting all 36 tools and their input schemas, plus `tools/call`
+  `tools/list` asserting all 38 tools and their input schemas, plus `tools/call`
   for the handler rules (the either/or on `get_activity_best_efforts`, date
   rejection before any HTTP call) and a handful of end-to-end calls against the
   fake API.
@@ -253,7 +253,8 @@ Four layers:
 `update_wellness` *(writes)*, `get_fitness_chart`
 
 **Calendar** — `list_events`, `get_event`, `create_event` *(writes)*,
-`update_event` *(writes)*, `delete_event` *(writes, gated)*
+`update_event` *(writes)*, `duplicate_events` *(writes)*, `apply_plan`
+*(writes)*, `delete_event` *(writes, gated)*
 
 **Workouts** — `list_workouts`, `get_workout`, `create_workout` *(writes)*,
 `update_workout` *(writes)*, `delete_workout` *(writes, gated)*,
@@ -361,13 +362,13 @@ because a model can set an argument itself:
 template and carries no training history of its own. Deleting one leaves
 calendar events already created from it untouched.
 
-**Reads and writes are labelled.** 26 of the 36 tools only read, and are
-annotated `readOnlyHint: true` so a client can auto-approve them. The ten
+**Reads and writes are labelled.** 26 of the 38 tools only read, and are
+annotated `readOnlyHint: true` so a client can auto-approve them. The twelve
 writers come in three shapes. The updates — `update_activity`,
 `update_wellness`, `update_event`, `update_workout`, `update_sport_settings` — overwrite fields on an
 existing record (`destructiveHint: true`, `idempotentHint: true`: repeating
 the call leaves the record in the same state). The creates — `create_event`,
-`create_workout`, `create_folder` — only ever add (`destructiveHint: false`,
+`duplicate_events`, `apply_plan`, `create_workout`, `create_folder` — only ever add (`destructiveHint: false`,
 but `idempotentHint: false`, since a second call adds a second entry). The
 deletes — `delete_event`, `delete_workout` — are `destructiveHint: true` and
 `idempotentHint: true`, since once a record is gone a second delete changes
@@ -405,8 +406,8 @@ the split, so a new tool cannot be added without a hint.
 - The test suite never contacts Intervals.icu, so it pins down this server's
   behaviour rather than the upstream API's. A change in what Intervals.icu
   actually returns would not be caught by it.
-- Of the 36 tools, nineteen are driven end to end against the fake API
-  (`list_activities`, `update_sport_settings`, `search_intervals`, `get_activity_streams`, `get_activity_histogram`,
+- Of the 38 tools, twenty-one are driven end to end against the fake API
+  (`list_activities`, `duplicate_events`, `apply_plan`, `update_sport_settings`, `search_intervals`, `get_activity_streams`, `get_activity_histogram`,
   `get_power_curves`,
   `get_hr_curves`, `get_pace_curves`,
   `update_wellness`, `list_events`, `get_event`, `create_event`,

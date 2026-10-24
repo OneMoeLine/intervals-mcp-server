@@ -49,7 +49,7 @@ const schemas = new Map<string, z.ZodObject>();
 
 /** A tool's input schema, built once per process and reused by every server
  *  after the first. The hosted Worker builds a server per request, and
- *  constructing the 36 zod schemas costs more CPU than the rest of a request
+ *  constructing the 38 zod schemas costs more CPU than the rest of a request
  *  put together. Keyed by tool name: no schema depends on the config. */
 function schema<T extends z.ZodObject>(name: string, build: () => T): T {
   let cached = schemas.get(name) as T | undefined;
@@ -1154,6 +1154,75 @@ export function createServer(config: ServerConfig): McpServer {
           `/athlete/${client.athleteId}/events/${event_id}`,
           compactBody(fields)
         )
+      )
+  );
+
+  server.registerTool(
+    "duplicate_events",
+    {
+      title: "Duplicate calendar events",
+      description:
+        "Copy one or more calendar events forward by whole weeks, e.g. repeat this " +
+        "week's three key sessions for the next four weeks. Each copy keeps the " +
+        "original's weekday and time. Returns the new events.",
+      inputSchema: schema("duplicate_events", () =>
+        z.object({
+          event_ids: z
+            .array(z.number().int())
+            .min(1)
+            .describe("IDs of the events to copy"),
+          num_copies: z
+            .number()
+            .int()
+            .min(1)
+            .max(52)
+            .optional()
+            .describe("How many copies of each event (default 1)"),
+          weeks_between: z
+            .number()
+            .int()
+            .min(1)
+            .max(52)
+            .optional()
+            .describe("Weeks between one copy and the next (default 1)"),
+        })
+      ),
+      annotations: CREATE,
+    },
+    async ({ event_ids, num_copies = 1, weeks_between = 1 }) => {
+      const created = await client.post(
+        `/athlete/${client.athleteId}/duplicate-events`,
+        { eventIds: event_ids, numCopies: num_copies, weeksBetween: weeks_between }
+      );
+      return json(project(created, EVENT_SUMMARY_FIELDS, false));
+    }
+  );
+
+  server.registerTool(
+    "apply_plan",
+    {
+      title: "Apply training plan",
+      description:
+        "Put every workout in a training plan onto the calendar, starting from a " +
+        "date: the plan's first day lands on start_date and the rest keep their " +
+          "spacing. " +
+        "Find plans with list_folders (type PLAN), or build one with create_folder " +
+        "and create_workout using `day`. This can add dozens of events at once, so " +
+        "confirm the plan and start date with the user first.",
+      inputSchema: schema("apply_plan", () =>
+        z.object({
+          folder_id: z.number().int().describe("ID of the plan (a PLAN folder)"),
+          start_date: isoDate("Date the plan's first day lands on, YYYY-MM-DD"),
+        })
+      ),
+      annotations: CREATE,
+    },
+    async ({ folder_id, start_date }) =>
+      json(
+        await client.post(`/athlete/${client.athleteId}/events/apply-plan`, {
+          folder_id,
+          start_date_local: `${start_date}T00:00:00`,
+        })
       )
   );
 
