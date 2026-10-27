@@ -449,6 +449,27 @@ export function paceToSpeed(pace: string): number {
   return Number((PACE_UNIT_METRES[m[3].toLowerCase()] / secs).toFixed(4));
 }
 
+/** Gear types the API accepts: whole items, then components. */
+export const GEAR_TYPES = [
+  "Bike", "Shoes", "Wetsuit", "RowingMachine", "Skis", "Snowboard", "Boat",
+  "Board", "Equipment", "Accessories", "Apparel", "Computer", "Light",
+  "Battery", "Brake", "BrakePads", "Rotor", "Drivetrain", "BottomBracket",
+  "Cassette", "Chain", "Chainrings", "Crankset", "Derailleur", "Pedals",
+  "Lever", "Cable", "Frame", "Fork", "Handlebar", "Headset", "Saddle",
+  "Seatpost", "Shock", "Stem", "Axel", "Hub", "Trainer", "Tube", "Tyre",
+  "Wheel", "Wheelset", "PowerMeter", "Cleats", "CyclingShoes", "Paddle",
+] as const;
+
+/** Activity comments: who, when and what. */
+export const MESSAGE_SUMMARY_FIELDS = [
+  "id",
+  "name",
+  "type",
+  "created",
+  "content",
+  "attachment_url",
+];
+
 /** The activity histograms, each at `/activity/{id}/{metric}-histogram`. */
 export const HISTOGRAM_METRICS = ["power", "hr", "pace", "gap"] as const;
 

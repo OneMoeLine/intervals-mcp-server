@@ -119,36 +119,51 @@ one `create_event` per session. The optional `extra_workouts` on apply-plan
 is left out. Neither is verified live yet: which plan day lands on
 `start_date`, and what apply-plan returns.
 
+Then the rest of Tier 1 — 45 tools, 27 read-only and 18 writers:
+
+- **`create_events`** posts an array to `/events/bulk`. Each entry is the
+  same zod shape as `create_event` (now built by one shared function), so the
+  category enum and date checks apply per entry, and the created events come
+  back trimmed to the summary set.
+- **`get_activity_messages` and `add_activity_message`** read and post
+  activity comments (`/activity/{id}/messages`, body `{content}`). Posting is
+  the only write here that another person reads, and there is no delete tool
+  for it, so the description tells the model to show the exact text and get
+  the user's go ahead first. Blank comments are refused by the schema.
+- **Gear:** `create_gear`, `update_gear`, `add_gear_reminder`,
+  `update_gear_reminder`. `type` is an enum of the 46 types the API takes.
+  Retiring sets `retired` to today in the athlete's zone; un-retiring sends
+  `""`, because the API ignores a null there. Reminder thresholds are taken
+  in km and hours and sent as metres and seconds. Gear delete is left out.
+
+None of these has been exercised live yet: the shapes come from the upstream
+server. The configured athlete has no gear, so the gear tools are the least
+checked of the lot.
+
 ## Tier 1 — next up
 
-1. **Gear writes and maintenance reminders** — small, self-contained, and the
-   kind of thing people actually want nagging about.
-2. **Bulk event create** — `events/bulk`, for a block that is not worth
-   saving as a plan. `apply_plan` covers the common case.
-3. **Activity messages** — read and post comments on an activity. The coach
-   feedback loop; also the only write path that talks to another human, so it
-   deserves an explicit confirmation story.
+Tier 1 is done. Tier 2 below is next.
 
 ## Tier 2 — nice to have
 
-4. **Annual training plan** — periodization targets and week notes.
-5. **`get_upcoming_workouts`** — the next N planned sessions with their IDs.
+1. **Annual training plan** — periodization targets and week notes.
+2. **`get_upcoming_workouts`** — the next N planned sessions with their IDs.
    Possibly just better defaults on `list_events` rather than a new tool.
-6. **`get_activities_around`** — the activities surrounding a given one, for
+3. **`get_activities_around`** — the activities surrounding a given one, for
    "what was I doing the week of that breakthrough ride".
-7. **Multi-athlete / coach support** — `list_athletes` with access levels, and
+4. **Multi-athlete / coach support** — `list_athletes` with access levels, and
     an optional `athlete_id` on the read tools. The athlete is currently fixed
     by `INTERVALS_ATHLETE_ID`. This is an architectural change, not a tool:
     worth deciding before the tool count grows further.
-8. **Athlete notes** read/write.
-9. **Custom items** — custom charts, fields, zones, dashboard panels. Large API
+5. **Athlete notes** read/write.
+6. **Custom items** — custom charts, fields, zones, dashboard panels. Large API
     surface, narrow audience; upstream ships a schema resource to make it usable.
-10. **File downloads** — original / FIT / GPX. Awkward over MCP (binary as
+7. **File downloads** — original / FIT / GPX. Awkward over MCP (binary as
     base64 bloats context); only worth it if we return a resource link or write
     to a path rather than inlining bytes.
-11. **Manual and route writes** — `bulk_create_manual_activities` (upsert by
+8. **Manual and route writes** — `bulk_create_manual_activities` (upsert by
     external ID) is how you backfill non-synced training.
-12. **Event deletes beyond one at a time** — `events/bulk-delete` and the
+9. **Event deletes beyond one at a time** — `events/bulk-delete` and the
     `others`/`notBefore` options on the single delete. Deliberately left out of
     the first pass: "delete the event I named" is easy to reason about, "delete
     everything added alongside it" is not.
