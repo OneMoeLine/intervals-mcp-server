@@ -18,6 +18,8 @@ const EXPECTED_TOOLS = [
   "get_activity_best_efforts",
   "get_activity_weather",
   "get_activity_histogram",
+  "get_activity_messages",
+  "add_activity_message",
   "update_activity",
   "get_power_curves",
   "get_hr_curves",
@@ -29,6 +31,7 @@ const EXPECTED_TOOLS = [
   "list_events",
   "get_event",
   "create_event",
+  "create_events",
   "update_event",
   "duplicate_events",
   "apply_plan",
@@ -41,6 +44,10 @@ const EXPECTED_TOOLS = [
   "list_folders",
   "create_folder",
   "list_gear",
+  "create_gear",
+  "update_gear",
+  "add_gear_reminder",
+  "update_gear_reminder",
   "list_routes",
   "get_route",
 ];
@@ -50,15 +57,21 @@ const EXPECTED_TOOLS = [
  *  The two delete tools are here because the default delete mode registers
  *  them; "none" takes them away, which has its own test. */
 const EXPECTED_WRITERS = [
+  "add_activity_message",
+  "add_gear_reminder",
   "apply_plan",
   "create_event",
+  "create_events",
   "create_folder",
+  "create_gear",
   "create_workout",
   "delete_event",
   "delete_workout",
   "duplicate_events",
   "update_activity",
   "update_event",
+  "update_gear",
+  "update_gear_reminder",
   "update_sport_settings",
   "update_wellness",
   "update_workout",
@@ -108,8 +121,8 @@ describe("startup", () => {
 });
 
 describe("tools/list", () => {
-  it("exposes all 38 tools", () => {
-    expect(tools).toHaveLength(38);
+  it("exposes all 45 tools", () => {
+    expect(tools).toHaveLength(45);
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());
   });
 
@@ -174,7 +187,7 @@ describe("tools/list", () => {
     }
   });
 
-  it("reports exactly twelve writers, and they are the expected twelve", () => {
+  it("reports exactly eighteen writers, and they are the expected eighteen", () => {
     const writers = tools
       .filter((t) => t.annotations?.readOnlyHint === false)
       .map((t) => t.name)
@@ -879,6 +892,154 @@ describe("calendar bulk operations", () => {
       arguments: { event_ids: [] },
     });
     expect(res.result?.isError ?? Boolean(res.error)).toBe(true);
+    expect(fake.requests.length).toBe(before);
+  });
+});
+
+describe("bulk events, comments and gear", () => {
+  it("creates several events in one POST and trims what comes back", async () => {
+    fake.replyWith({
+      body: [
+        { id: 1, name: "Easy", start_date_local: "2026-11-02T00:00:00", workout_doc: {} },
+        { id: 2, name: "Tempo", start_date_local: "2026-11-04T00:00:00", workout_doc: {} },
+      ],
+    });
+    const res = await server.request("tools/call", {
+      name: "create_events",
+      arguments: {
+        events: [
+          { start_date_local: "2026-11-02T00:00:00", category: "WORKOUT", name: "Easy", type: "Run" },
+          { start_date_local: "2026-11-04", category: "WORKOUT", name: "Tempo", type: "Run", moving_time: 3600 },
+        ],
+      },
+    });
+
+    const req = fake.requests[fake.requests.length - 1];
+    expect(req.method).toBe("POST");
+    expect(req.path).toBe("/athlete/i1/events/bulk");
+    expect(JSON.parse(req.body)).toEqual([
+      { start_date_local: "2026-11-02T00:00:00", category: "WORKOUT", name: "Easy", type: "Run" },
+      { start_date_local: "2026-11-04", category: "WORKOUT", name: "Tempo", type: "Run", moving_time: 3600 },
+    ]);
+    const created = JSON.parse(res.result.content[0].text);
+    expect(created).toHaveLength(2);
+    expect(created[0]).not.toHaveProperty("workout_doc");
+  });
+
+  it("rejects a bulk create with a bad category, before any HTTP call", async () => {
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "create_events",
+      arguments: {
+        events: [{ start_date_local: "2026-11-02", category: "RACE" }],
+      },
+    });
+    expect(res.result?.isError ?? Boolean(res.error)).toBe(true);
+    expect(fake.requests.length).toBe(before);
+  });
+
+  it("reads an activity's comments, trimmed", async () => {
+    fake.replyWith({
+      body: [
+        { id: 5, athlete_id: "i2", name: "Coach", type: "TEXT", created: "2026-10-20T10:00:00Z", content: "Strong finish", seen: true },
+      ],
+    });
+    const res = await server.request("tools/call", {
+      name: "get_activity_messages",
+      arguments: { activity_id: "i77" },
+    });
+    expect(fake.requests[fake.requests.length - 1].path).toBe("/activity/i77/messages");
+    expect(JSON.parse(res.result.content[0].text)).toEqual([
+      { id: 5, name: "Coach", type: "TEXT", created: "2026-10-20T10:00:00Z", content: "Strong finish" },
+    ]);
+  });
+
+  it("posts a comment, and refuses a blank one", async () => {
+    fake.replyWith({ body: { id: 6 } });
+    await server.request("tools/call", {
+      name: "add_activity_message",
+      arguments: { activity_id: "i77", content: "Thanks!" },
+    });
+    const req = fake.requests[fake.requests.length - 1];
+    expect(req.method).toBe("POST");
+    expect(req.path).toBe("/activity/i77/messages");
+    expect(JSON.parse(req.body)).toEqual({ content: "Thanks!" });
+
+    const before = fake.requests.length;
+    const blank = await server.request("tools/call", {
+      name: "add_activity_message",
+      arguments: { activity_id: "i77", content: "   " },
+    });
+    expect(blank.result?.isError ?? Boolean(blank.error)).toBe(true);
+    expect(fake.requests.length).toBe(before);
+  });
+
+  it("creates gear with a type the API knows", async () => {
+    fake.replyWith({ body: { id: "b1" } });
+    await server.request("tools/call", {
+      name: "create_gear",
+      arguments: { name: "Tarmac", type: "Bike" },
+    });
+    const req = fake.requests[fake.requests.length - 1];
+    expect(req.path).toBe("/athlete/i1/gear");
+    expect(JSON.parse(req.body)).toEqual({ name: "Tarmac", type: "Bike" });
+  });
+
+  it("retires gear with a date and un-retires it with an empty string", async () => {
+    fake.replyWith({ body: { id: "b1" } });
+    await server.request("tools/call", {
+      name: "update_gear",
+      arguments: { gear_id: "b1", retired: true },
+    });
+    const retire = fake.requests[fake.requests.length - 1];
+    expect(retire.method).toBe("PUT");
+    expect(retire.path).toBe("/athlete/i1/gear/b1");
+    expect(JSON.parse(retire.body).retired).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+    await server.request("tools/call", {
+      name: "update_gear",
+      arguments: { gear_id: "b1", retired: false },
+    });
+    expect(JSON.parse(fake.requests[fake.requests.length - 1].body)).toEqual({ retired: "" });
+  });
+
+  it("converts reminder thresholds to metres and seconds", async () => {
+    fake.replyWith({ body: { id: "b1", reminders: [] } });
+    await server.request("tools/call", {
+      name: "add_gear_reminder",
+      arguments: { gear_id: "b1", name: "Replace chain", every_km: 3000, every_hours: 1.5 },
+    });
+    const add = fake.requests[fake.requests.length - 1];
+    expect(add.method).toBe("POST");
+    expect(add.path).toBe("/athlete/i1/gear/b1/reminder");
+    expect(JSON.parse(add.body)).toEqual({ name: "Replace chain", distance: 3_000_000, time: 5400 });
+
+    await server.request("tools/call", {
+      name: "update_gear_reminder",
+      arguments: { gear_id: "b1", reminder_id: 9, every_km: 2500 },
+    });
+    const upd = fake.requests[fake.requests.length - 1];
+    expect(upd.method).toBe("PUT");
+    expect(upd.path).toBe("/athlete/i1/gear/b1/reminder/9");
+    expect(upd.query).toEqual({ reset: "false", snoozeDays: "0" });
+    expect(JSON.parse(upd.body)).toEqual({ distance: 2_500_000 });
+
+    await server.request("tools/call", {
+      name: "update_gear_reminder",
+      arguments: { gear_id: "b1", reminder_id: 9, reset: true },
+    });
+    const done = fake.requests[fake.requests.length - 1];
+    expect(done.query).toEqual({ reset: "true", snoozeDays: "0" });
+    expect(JSON.parse(done.body)).toEqual({});
+  });
+
+  it("refuses a reminder with no threshold, before any HTTP call", async () => {
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "add_gear_reminder",
+      arguments: { gear_id: "b1", name: "Replace chain" },
+    });
+    expect(res.result.isError).toBe(true);
     expect(fake.requests.length).toBe(before);
   });
 });

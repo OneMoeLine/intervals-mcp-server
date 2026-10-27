@@ -11,7 +11,9 @@ import {
   EVENT_SUMMARY_FIELDS,
   FITNESS_FIELDS,
   FOLDER_SUMMARY_FIELDS,
+  GEAR_TYPES,
   HISTOGRAM_METRICS,
+  MESSAGE_SUMMARY_FIELDS,
   HR_CURVE_SUMMARY_FIELDS,
   INTERVAL_SEARCH_SUMMARY_FIELDS,
   INTERVAL_SUMMARY_FIELDS,
@@ -21,6 +23,7 @@ import {
   REDACTED_ATHLETE_FIELDS,
   WELLNESS_SUMMARY_FIELDS,
   activityId,
+  gearId,
   compactBody,
   downsampleStreams,
   fieldsParam,
@@ -61,7 +64,7 @@ const schemas = new Map<string, z.ZodObject>();
 
 /** A tool's input schema, built once per process and reused by every server
  *  after the first. The hosted Worker builds a server per request, and
- *  constructing the 38 zod schemas costs more CPU than the rest of a request
+ *  constructing the 45 zod schemas costs more CPU than the rest of a request
  *  put together. Keyed by tool name: no schema depends on the config. */
 function schema<T extends z.ZodObject>(name: string, build: () => T): T {
   let cached = schemas.get(name) as T | undefined;
@@ -698,6 +701,60 @@ export function createServer(config: ServerConfig): McpServer {
   );
 
   server.registerTool(
+    "get_activity_messages",
+    {
+      title: "Get activity comments",
+      description:
+        "Read the comments and notes on an activity - a coach's feedback, the " +
+        "athlete's own notes - oldest first as the API returns them.",
+      inputSchema: schema("get_activity_messages", () =>
+        z.object({
+          activity_id: activityId(),
+        })
+      ),
+      annotations: READ_ONLY,
+    },
+    async ({ activity_id }) =>
+      json(
+        project(
+          await client.get(`/activity/${segment(activity_id)}/messages`),
+          MESSAGE_SUMMARY_FIELDS,
+          false
+        )
+      )
+  );
+
+  server.registerTool(
+    "add_activity_message",
+    {
+      title: "Comment on activity",
+      description:
+        "Post a comment on an activity. It is posted as the athlete and is seen " +
+        "by everyone who can see the activity, a coach included, and there is no " +
+        "tool to take it back - show the user the exact text and get their go " +
+        "ahead before posting.",
+      inputSchema: schema("add_activity_message", () =>
+        z.object({
+          activity_id: activityId(),
+          content: z
+            .string()
+            .trim()
+            .min(1)
+            .max(4000)
+            .describe("The comment text"),
+        })
+      ),
+      annotations: CREATE,
+    },
+    async ({ activity_id, content }) =>
+      json(
+        await client.post(`/activity/${segment(activity_id)}/messages`, {
+          content,
+        })
+      )
+  );
+
+  server.registerTool(
     "update_activity",
     {
       title: "Update activity",
@@ -1055,6 +1112,52 @@ export function createServer(config: ServerConfig): McpServer {
     }
   );
 
+  /** The fields of one new calendar event, shared by create_event and the
+   *  per-event entries of create_events. */
+  const newEventShape = () => ({
+    start_date_local: isoDateTime(
+      "Start date/time in ISO 8601 format e.g. 2024-06-01T08:00:00"
+    ),
+    category: z.enum(EVENT_CATEGORIES).describe("Event category"),
+    name: z.string().optional().describe("Event name/title"),
+    description: z
+      .string()
+      .optional()
+      .describe(
+        "Event notes, or workout syntax for a structured WORKOUT - see the " +
+          "intervals-icu://workout-syntax resource"
+      ),
+    type: z
+      .string()
+      .optional()
+      .describe(
+        "Sport type, validated strictly by the API e.g. Ride, VirtualRide, " +
+          "Run, Swim, WeightTraining. Required for the RACE categories and " +
+          "for SET_EFTP, which sets the eFTP of one sport."
+      ),
+    end_date_local: isoDateTime(
+      "End date/time for a ranged event - PLAN, HOLIDAY, SICK, INJURED"
+    ).optional(),
+    moving_time: z
+      .number()
+      .positive()
+      .optional()
+      .describe(
+        "Planned duration in seconds. Omit for a workout whose steps already " +
+          "set the duration."
+      ),
+    distance: z
+      .number()
+      .positive()
+      .optional()
+      .describe("Planned distance in meters"),
+    indoor: z.boolean().optional().describe("Planned as an indoor session"),
+    target: z
+      .enum(["AUTO", "POWER", "HR", "PACE"])
+      .optional()
+      .describe("Which metric the workout's targets are expressed against"),
+  });
+
   server.registerTool(
     "create_event",
     {
@@ -1067,51 +1170,7 @@ export function createServer(config: ServerConfig): McpServer {
         "the `intervals-icu://workout-syntax` resource; a description it cannot " +
         "parse is silently kept as plain text with no load. " +
         EVENT_CATEGORY_HELP,
-      inputSchema: schema("create_event", () =>
-        z.object({
-          start_date_local: isoDateTime(
-            "Start date/time in ISO 8601 format e.g. 2024-06-01T08:00:00"
-          ),
-          category: z.enum(EVENT_CATEGORIES).describe("Event category"),
-          name: z.string().optional().describe("Event name/title"),
-          description: z
-            .string()
-            .optional()
-            .describe(
-              "Event notes, or workout syntax for a structured WORKOUT - see the " +
-                "intervals-icu://workout-syntax resource"
-            ),
-          type: z
-            .string()
-            .optional()
-            .describe(
-              "Sport type, validated strictly by the API e.g. Ride, VirtualRide, " +
-                "Run, Swim, WeightTraining. Required for the RACE categories and " +
-                "for SET_EFTP, which sets the eFTP of one sport."
-            ),
-          end_date_local: isoDateTime(
-            "End date/time for a ranged event - PLAN, HOLIDAY, SICK, INJURED"
-          ).optional(),
-          moving_time: z
-            .number()
-            .positive()
-            .optional()
-            .describe(
-              "Planned duration in seconds. Omit for a workout whose steps already " +
-                "set the duration."
-            ),
-          distance: z
-            .number()
-            .positive()
-            .optional()
-            .describe("Planned distance in meters"),
-          indoor: z.boolean().optional().describe("Planned as an indoor session"),
-          target: z
-            .enum(["AUTO", "POWER", "HR", "PACE"])
-            .optional()
-            .describe("Which metric the workout's targets are expressed against"),
-        })
-      ),
+      inputSchema: schema("create_event", () => z.object(newEventShape())),
       annotations: CREATE,
     },
     async (fields) =>
@@ -1121,6 +1180,35 @@ export function createServer(config: ServerConfig): McpServer {
           compactBody(fields)
         )
       )
+  );
+
+  server.registerTool(
+    "create_events",
+    {
+      title: "Create calendar events",
+      description:
+        "Create several calendar events in one call - a week of sessions, a race " +
+        "with its taper. Each entry takes the same fields as create_event. For a " +
+        "block worth reusing, a plan (create_folder type PLAN, then apply_plan) " +
+        "is the better tool. Returns the created events.",
+      inputSchema: schema("create_events", () =>
+        z.object({
+          events: z
+            .array(z.object(newEventShape()))
+            .min(1)
+            .max(100)
+            .describe("The events to create, each shaped like a create_event call"),
+        })
+      ),
+      annotations: CREATE,
+    },
+    async ({ events }) => {
+      const created = await client.post(
+        `/athlete/${client.athleteId}/events/bulk`,
+        events.map((e) => compactBody(e))
+      );
+      return json(project(created, EVENT_SUMMARY_FIELDS, false));
+    }
   );
 
   server.registerTool(
@@ -1541,6 +1629,164 @@ export function createServer(config: ServerConfig): McpServer {
       annotations: READ_ONLY,
     },
     async () => json(await client.get(`/athlete/${client.athleteId}/gear`))
+  );
+
+  server.registerTool(
+    "create_gear",
+    {
+      title: "Create gear",
+      description:
+        "Add a bike, pair of shoes or component to the athlete's gear, so " +
+        "activities can be assigned to it and its distance tracked.",
+      inputSchema: schema("create_gear", () =>
+        z.object({
+          name: z.string().min(1).describe("Gear name, e.g. Tarmac SL7"),
+          type: z
+            .enum(GEAR_TYPES)
+            .describe("Gear type, e.g. Bike, Shoes, Chain, Cassette, Tyre"),
+        })
+      ),
+      annotations: CREATE,
+    },
+    async (fields) =>
+      json(await client.post(`/athlete/${client.athleteId}/gear`, fields))
+  );
+
+  server.registerTool(
+    "update_gear",
+    {
+      title: "Update gear",
+      description:
+        "Rename gear, change its type, or retire it (retired: true, dated today) " +
+        "and bring it back (retired: false). Only supply what should change.",
+      inputSchema: schema("update_gear", () =>
+        z.object({
+          gear_id: gearId(),
+          name: z.string().min(1).optional().describe("New name"),
+          type: z.enum(GEAR_TYPES).optional().describe("New gear type"),
+          retired: z
+            .boolean()
+            .optional()
+            .describe("true retires it as of today, false un-retires it"),
+        })
+      ),
+      annotations: UPDATE,
+    },
+    async ({ gear_id, retired, ...rest }) => {
+      const body: Record<string, unknown> = compactBody(rest);
+      // The API ignores a null `retired`; an empty string is what clears it.
+      if (retired !== undefined) {
+        body.retired = retired ? localToday(config.timeZone) : "";
+      }
+      if (Object.keys(body).length === 0) {
+        throw new Error("Nothing to change: supply name, type or retired.");
+      }
+      return json(
+        await client.put(`/athlete/${client.athleteId}/gear/${segment(gear_id)}`, body)
+      );
+    }
+  );
+
+  /** A reminder's thresholds, in the units people use; the API wants metres
+   *  and seconds. */
+  const reminderBody = (fields: {
+    name?: string;
+    every_km?: number;
+    every_hours?: number;
+  }) =>
+    compactBody({
+      name: fields.name,
+      distance:
+        fields.every_km === undefined ? undefined : Math.round(fields.every_km * 1000),
+      time:
+        fields.every_hours === undefined
+          ? undefined
+          : Math.round(fields.every_hours * 3600),
+    });
+
+  server.registerTool(
+    "add_gear_reminder",
+    {
+      title: "Add gear maintenance reminder",
+      description:
+        "Add a maintenance reminder to gear, e.g. \"Replace chain\" every 3000 " +
+        "km, or \"Service fork\" every 50 hours. Intervals.icu flags it once " +
+        "the gear has done that much since the reminder was set. Returns the " +
+        "gear with its reminders.",
+      inputSchema: schema("add_gear_reminder", () =>
+        z.object({
+          gear_id: gearId(),
+          name: z.string().min(1).describe("What to do, e.g. Replace chain"),
+          every_km: z.number().positive().optional().describe("Due every N km"),
+          every_hours: z
+            .number()
+            .positive()
+            .optional()
+            .describe("Due every N hours of use"),
+        })
+      ),
+      annotations: CREATE,
+    },
+    async ({ gear_id, ...fields }) => {
+      if (fields.every_km === undefined && fields.every_hours === undefined) {
+        throw new Error("Give the reminder every_km, every_hours, or both.");
+      }
+      return json(
+        await client.post(
+          `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder`,
+          reminderBody(fields)
+        )
+      );
+    }
+  );
+
+  server.registerTool(
+    "update_gear_reminder",
+    {
+      title: "Update gear maintenance reminder",
+      description:
+        "Change a gear reminder's text or how often it falls due, or mark the " +
+        "maintenance done (reset). Reminder IDs are on each gear's `reminders` " +
+        "in list_gear. Only supply what should change.",
+      inputSchema: schema("update_gear_reminder", () =>
+        z.object({
+          gear_id: gearId(),
+          reminder_id: z.number().int().describe("The reminder ID"),
+          name: z.string().min(1).optional().describe("New reminder text"),
+          every_km: z.number().positive().optional().describe("Due every N km"),
+          every_hours: z
+            .number()
+            .positive()
+            .optional()
+            .describe("Due every N hours of use"),
+          reset: z
+            .boolean()
+            .optional()
+            .describe(
+              "true once the maintenance is done: restarts the count from now"
+            ),
+        })
+      ),
+      annotations: UPDATE,
+    },
+    async ({ gear_id, reminder_id, reset = false, ...fields }) => {
+      const body = reminderBody(fields);
+      if (Object.keys(body).length === 0 && !reset) {
+        throw new Error(
+          "Nothing to change: supply name, every_km, every_hours or reset."
+        );
+      }
+      // The spec makes `reset` and `snoozeDays` required on this PUT, so an
+      // ordinary edit says explicitly that it does neither.
+      return json(
+        await client.request(
+          "PUT",
+          `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder/${segment(reminder_id)}`,
+          { reset: String(reset), snoozeDays: "0" },
+          body
+        )
+      );
+    }
   );
 
   // ── Routes ─────────────────────────────────────────────────────────────────

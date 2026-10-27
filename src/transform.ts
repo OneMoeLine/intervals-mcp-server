@@ -371,6 +371,12 @@ export const activityId = () =>
     .regex(ACTIVITY_ID_RE, "Must be an activity ID such as i12345678")
     .describe("The activity ID");
 
+export const gearId = () =>
+  z
+    .string()
+    .regex(ACTIVITY_ID_RE, "Must be a gear ID such as b1234567")
+    .describe("The gear ID, from list_gear");
+
 export const numericId = (description: string) =>
   z.string().regex(NUMERIC_ID_RE, "Must be a numeric ID").describe(description);
 
@@ -448,6 +454,27 @@ export function paceToSpeed(pace: string): number {
   if (secs === 0) throw new Error("A pace of 0:00 is not a threshold.");
   return Number((PACE_UNIT_METRES[m[3].toLowerCase()] / secs).toFixed(4));
 }
+
+/** Gear types the API accepts: whole items, then components. */
+export const GEAR_TYPES = [
+  "Bike", "Shoes", "Wetsuit", "RowingMachine", "Skis", "Snowboard", "Boat",
+  "Board", "Equipment", "Accessories", "Apparel", "Computer", "Light",
+  "Battery", "Brake", "BrakePads", "Rotor", "Drivetrain", "BottomBracket",
+  "Cassette", "Chain", "Chainrings", "Crankset", "Derailleur", "Pedals",
+  "Lever", "Cable", "Frame", "Fork", "Handlebar", "Headset", "Saddle",
+  "Seatpost", "Shock", "Stem", "Axel", "Hub", "Trainer", "Tube", "Tyre",
+  "Wheel", "Wheelset", "PowerMeter", "Cleats", "CyclingShoes", "Paddle",
+] as const;
+
+/** Activity comments: who, when and what. */
+export const MESSAGE_SUMMARY_FIELDS = [
+  "id",
+  "name",
+  "type",
+  "created",
+  "content",
+  "attachment_url",
+];
 
 /** The activity histograms, each at `/activity/{id}/{metric}-histogram`. */
 export const HISTOGRAM_METRICS = ["power", "hr", "pace", "gap"] as const;
