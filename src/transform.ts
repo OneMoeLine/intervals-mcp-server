@@ -371,6 +371,12 @@ export const activityId = () =>
     .regex(ACTIVITY_ID_RE, "Must be an activity ID such as i12345678")
     .describe("The activity ID");
 
+export const gearId = () =>
+  z
+    .string()
+    .regex(ACTIVITY_ID_RE, "Must be a gear ID such as b1234567")
+    .describe("The gear ID, from list_gear");
+
 export const numericId = (description: string) =>
   z.string().regex(NUMERIC_ID_RE, "Must be a numeric ID").describe(description);
 

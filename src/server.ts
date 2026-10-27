@@ -23,6 +23,7 @@ import {
   REDACTED_ATHLETE_FIELDS,
   WELLNESS_SUMMARY_FIELDS,
   activityId,
+  gearId,
   compactBody,
   downsampleStreams,
   fieldsParam,
@@ -708,7 +709,7 @@ export function createServer(config: ServerConfig): McpServer {
         "athlete's own notes - oldest first as the API returns them.",
       inputSchema: schema("get_activity_messages", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
         })
       ),
       annotations: READ_ONLY,
@@ -716,7 +717,7 @@ export function createServer(config: ServerConfig): McpServer {
     async ({ activity_id }) =>
       json(
         project(
-          await client.get(`/activity/${activity_id}/messages`),
+          await client.get(`/activity/${segment(activity_id)}/messages`),
           MESSAGE_SUMMARY_FIELDS,
           false
         )
@@ -734,7 +735,7 @@ export function createServer(config: ServerConfig): McpServer {
         "ahead before posting.",
       inputSchema: schema("add_activity_message", () =>
         z.object({
-          activity_id: z.string().describe("The activity ID"),
+          activity_id: activityId(),
           content: z
             .string()
             .trim()
@@ -747,7 +748,9 @@ export function createServer(config: ServerConfig): McpServer {
     },
     async ({ activity_id, content }) =>
       json(
-        await client.post(`/activity/${activity_id}/messages`, { content })
+        await client.post(`/activity/${segment(activity_id)}/messages`, {
+          content,
+        })
       )
   );
 
@@ -1658,7 +1661,7 @@ export function createServer(config: ServerConfig): McpServer {
         "and bring it back (retired: false). Only supply what should change.",
       inputSchema: schema("update_gear", () =>
         z.object({
-          gear_id: z.string().describe("The gear ID, from list_gear"),
+          gear_id: gearId(),
           name: z.string().min(1).optional().describe("New name"),
           type: z.enum(GEAR_TYPES).optional().describe("New gear type"),
           retired: z
@@ -1679,7 +1682,7 @@ export function createServer(config: ServerConfig): McpServer {
         throw new Error("Nothing to change: supply name, type or retired.");
       }
       return json(
-        await client.put(`/athlete/${client.athleteId}/gear/${gear_id}`, body)
+        await client.put(`/athlete/${client.athleteId}/gear/${segment(gear_id)}`, body)
       );
     }
   );
@@ -1712,7 +1715,7 @@ export function createServer(config: ServerConfig): McpServer {
         "gear with its reminders.",
       inputSchema: schema("add_gear_reminder", () =>
         z.object({
-          gear_id: z.string().describe("The gear ID, from list_gear"),
+          gear_id: gearId(),
           name: z.string().min(1).describe("What to do, e.g. Replace chain"),
           every_km: z.number().positive().optional().describe("Due every N km"),
           every_hours: z
@@ -1730,7 +1733,7 @@ export function createServer(config: ServerConfig): McpServer {
       }
       return json(
         await client.post(
-          `/athlete/${client.athleteId}/gear/${gear_id}/reminder`,
+          `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder`,
           reminderBody(fields)
         )
       );
@@ -1742,12 +1745,12 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Update gear maintenance reminder",
       description:
-        "Change a gear reminder's text or how often it falls due. Reminder IDs " +
-        "are on each gear's `reminders` in list_gear. Only supply what should " +
-        "change.",
+        "Change a gear reminder's text or how often it falls due, or mark the " +
+        "maintenance done (reset). Reminder IDs are on each gear's `reminders` " +
+        "in list_gear. Only supply what should change.",
       inputSchema: schema("update_gear_reminder", () =>
         z.object({
-          gear_id: z.string().describe("The gear ID"),
+          gear_id: gearId(),
           reminder_id: z.number().int().describe("The reminder ID"),
           name: z.string().min(1).optional().describe("New reminder text"),
           every_km: z.number().positive().optional().describe("Due every N km"),
@@ -1756,18 +1759,30 @@ export function createServer(config: ServerConfig): McpServer {
             .positive()
             .optional()
             .describe("Due every N hours of use"),
+          reset: z
+            .boolean()
+            .optional()
+            .describe(
+              "true once the maintenance is done: restarts the count from now"
+            ),
         })
       ),
       annotations: UPDATE,
     },
-    async ({ gear_id, reminder_id, ...fields }) => {
+    async ({ gear_id, reminder_id, reset = false, ...fields }) => {
       const body = reminderBody(fields);
-      if (Object.keys(body).length === 0) {
-        throw new Error("Nothing to change: supply name, every_km or every_hours.");
+      if (Object.keys(body).length === 0 && !reset) {
+        throw new Error(
+          "Nothing to change: supply name, every_km, every_hours or reset."
+        );
       }
+      // The spec makes `reset` and `snoozeDays` required on this PUT, so an
+      // ordinary edit says explicitly that it does neither.
       return json(
-        await client.put(
-          `/athlete/${client.athleteId}/gear/${gear_id}/reminder/${reminder_id}`,
+        await client.request(
+          "PUT",
+          `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder/${segment(reminder_id)}`,
+          { reset: String(reset), snoozeDays: "0" },
           body
         )
       );

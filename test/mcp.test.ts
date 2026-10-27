@@ -1021,7 +1021,16 @@ describe("bulk events, comments and gear", () => {
     const upd = fake.requests[fake.requests.length - 1];
     expect(upd.method).toBe("PUT");
     expect(upd.path).toBe("/athlete/i1/gear/b1/reminder/9");
+    expect(upd.query).toEqual({ reset: "false", snoozeDays: "0" });
     expect(JSON.parse(upd.body)).toEqual({ distance: 2_500_000 });
+
+    await server.request("tools/call", {
+      name: "update_gear_reminder",
+      arguments: { gear_id: "b1", reminder_id: 9, reset: true },
+    });
+    const done = fake.requests[fake.requests.length - 1];
+    expect(done.query).toEqual({ reset: "true", snoozeDays: "0" });
+    expect(JSON.parse(done.body)).toEqual({});
   });
 
   it("refuses a reminder with no threshold, before any HTTP call", async () => {

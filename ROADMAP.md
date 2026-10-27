@@ -134,7 +134,10 @@ Then the rest of Tier 1 — 45 tools, 27 read-only and 18 writers:
   `update_gear_reminder`. `type` is an enum of the 46 types the API takes.
   Retiring sets `retired` to today in the athlete's zone; un-retiring sends
   `""`, because the API ignores a null there. Reminder thresholds are taken
-  in km and hours and sent as metres and seconds. Gear delete is left out.
+  in km and hours and sent as metres and seconds. The reminder PUT carries
+  the `reset` and `snoozeDays` query parameters the spec requires, and
+  `reset: true` is how a model marks the maintenance done. Gear delete is
+  left out.
 
 None of these has been exercised live yet: the shapes come from the upstream
 server. The configured athlete has no gear, so the gear tools are the least
