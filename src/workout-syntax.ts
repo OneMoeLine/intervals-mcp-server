@@ -19,7 +19,7 @@
 export const WORKOUT_SYNTAX = `# Intervals.icu workout syntax
 
 Plain text that Intervals.icu parses into a structured workout. Put it in the
-\`description\` field of a WORKOUT event (create_event / update_event) or of a
+\`description\` field of a WORKOUT event (create_events / update_event) or of a
 library workout (create_workout / update_workout). Do not repeat the workout
 title inside the description - that is the \`name\` field.
 
