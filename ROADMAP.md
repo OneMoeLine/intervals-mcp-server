@@ -103,7 +103,8 @@ reading `/sport-settings` first, so "Ride" and "GravelRide" land on the same
 record). Threshold pace is taken as "3:56/km", "6:20/mi" or "1:45/100m" and
 converted here: the API stores it as m/s for every sport, swimming included,
 and quietly accepts a pace where the speed belongs. `recalcHrZones` defaults
-to true unless explicit `hr_zones` are given. Deliberately left out:
+to true only when `lthr` or `max_hr` changes and no explicit `hr_zones` are
+given; an FTP or pace change leaves the HR zones alone. Deliberately left out:
 `sport-settings/{id}/apply`, which re-scores past activities with the new
 zones. That rewrites history, so it waits for a decision on how the delete
 gate should cover it.
@@ -116,8 +117,7 @@ summary set, so a 12-week repeat does not come back with twelve
 to `/events/apply-plan`; with `create_folder` (type `PLAN`) and
 `create_workout` (`day`) a whole block is now build-then-apply rather than
 one `create_event` per session. The optional `extra_workouts` on apply-plan
-is left out. Neither is verified live yet: which plan day lands on
-`start_date`, and what apply-plan returns.
+is left out.
 
 Then the rest of Tier 1 — 45 tools, 27 read-only and 18 writers:
 
@@ -139,9 +139,32 @@ Then the rest of Tier 1 — 45 tools, 27 read-only and 18 writers:
   `reset: true` is how a model marks the maintenance done. Gear delete is
   left out.
 
-None of these has been exercised live yet: the shapes come from the upstream
-server. The configured athlete has no gear, so the gear tools are the least
-checked of the lot.
+### Live check, 2026-10-28
+
+Every Tier 1 writer was run once against the live account, and each change
+was undone where a tool allows it:
+
+- `update_sport_settings`: a partial PUT changes only the fields sent; the
+  rest of the record (zones, other thresholds) is kept.
+- `create_events`: works with full datetimes, but answered 422 to a
+  date-only `start_date_local`, after creating the entries before the bad one.
+  The bulk endpoint is not all-or-nothing. Bare dates are now sent as
+  midnight, and the description says to check the range before retrying.
+- `duplicate_events`: copies land a week apart at the same time of day.
+- `apply_plan`: returns `{}`. A workout's `day` is an offset from
+  `start_date`, so day 1 lands the day *after*. The `day` parameter on
+  `create_workout`/`update_workout` was documented as 1-based and is now
+  0-based to match.
+- `get_activity_messages`/`add_activity_message`: post and read back fine.
+  The post returns the whole chat record, not the message.
+- Gear: create, add a reminder (3000 km stored as 3,000,000 m), edit and
+  reset it (50 h stored as 180,000 s), and retire (dated in the athlete's
+  zone) all work. There is no gear delete, so the test item stays, retired.
+- `search_intervals`: an 8-25 minute search at 90-110% returned single
+  efforts of that length at threshold pace, as expected.
+
+Worth trimming later: `create_workout` and `list_workouts` return each
+workout's full `workout_doc` with per-zone times, about 2 KB a workout.
 
 ## Tier 1 — next up
 
@@ -182,8 +205,4 @@ Tier 1 is done. Tier 2 below is next.
   for.
 - **Output schemas.** No tool declares one, so a client cannot validate a result
   before handing it to a model.
-- **HTTP / SSE transport.** We are stdio-only. Upstream supports remote use and
-  is appropriately loud that MCP has no built-in auth, so HTTP needs a tunnel or
-  an authenticating proxy in front. Note `get_fitness_chart` compares dates
-  against the host's local day, which stops being the athlete's day as soon as
-  the server is not on their machine.
+

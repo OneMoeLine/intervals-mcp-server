@@ -211,6 +211,42 @@ describe("retries", () => {
   });
 });
 
+describe("retries for POST", () => {
+  it("does not retry a 5xx, which may have created the record", async () => {
+    fake.replyWith({ status: 502, body: "bad gateway" }, { body: { id: 2 } });
+    await expect(clientFor(fake).request("POST", "/x", undefined, {})).rejects.toThrow(
+      /Intervals\.icu API error 502: bad gateway/
+    );
+    expect(fake.requests).toHaveLength(1);
+  });
+
+  it("still retries a 429, which the API refused before acting", async () => {
+    fake.replyWith({ status: 429, body: "slow down" }, { body: { id: 1 } });
+    expect(await clientFor(fake).request("POST", "/x", undefined, {})).toEqual({ id: 1 });
+    expect(fake.requests).toHaveLength(2);
+  });
+
+  it("does not retry a transport failure, and says to check first", async () => {
+    const dead = await startFakeServer();
+    const url = dead.baseUrl;
+    await dead.close();
+
+    await expect(
+      clientFor({ baseUrl: url }).request("POST", "/x", undefined, {})
+    ).rejects.toThrow(/POST failed - network error.*not retried/);
+  });
+
+  it("keeps retrying a PUT and a DELETE on a 5xx", async () => {
+    fake.replyWith({ status: 503, body: "a" }, { body: { ok: 1 } });
+    expect(await clientFor(fake).request("PUT", "/x", undefined, {})).toEqual({ ok: 1 });
+    await fake.close();
+    fake = await startFakeServer();
+    fake.replyWith({ status: 503, body: "a" }, { body: { ok: 2 } });
+    expect(await clientFor(fake).request("DELETE", "/x")).toEqual({ ok: 2 });
+    expect(fake.requests).toHaveLength(2);
+  });
+});
+
 describe("retry delay", () => {
   it("passes the failing response to the backoff on each retry", async () => {
     const seen: Array<{ attempt: number; retryAfter: string | null }> = [];

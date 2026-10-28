@@ -299,7 +299,8 @@ export function createServer(config: ServerConfig): McpServer {
             .optional()
             .describe(
               "Recalculate HR zones from the new threshold or max HR. Defaults to " +
-                "true, or false when hr_zones is given."
+                "true when lthr or max_hr changes and hr_zones is not given, " +
+                "otherwise false."
             ),
         })
       ),
@@ -331,7 +332,12 @@ export function createServer(config: ServerConfig): McpServer {
         );
       }
 
-      const recalc = recalc_hr_zones ?? rest.hr_zones === undefined;
+      // Recalculating rewrites the athlete's HR zones, so it is only the default
+      // when the change is one the zones are derived from.
+      const recalc =
+        recalc_hr_zones ??
+        (rest.hr_zones === undefined &&
+          (rest.lthr !== undefined || rest.max_hr !== undefined));
       const updated = await client.request<Record<string, unknown>>(
         "PUT",
         `/athlete/${client.athleteId}/sport-settings/${current.id}`,
@@ -1112,6 +1118,13 @@ export function createServer(config: ServerConfig): McpServer {
     }
   );
 
+  /** The bulk endpoint answers 422 to a date-only start, so a bare date is
+   *  sent as midnight, which is what the single-event endpoint makes of it. */
+  const withStartTime = <T extends { start_date_local: string }>(e: T): T =>
+    e.start_date_local.length === 10
+      ? { ...e, start_date_local: `${e.start_date_local}T00:00:00` }
+      : e;
+
   /** The fields of one new calendar event, shared by create_event and the
    *  per-event entries of create_events. */
   const newEventShape = () => ({
@@ -1177,7 +1190,7 @@ export function createServer(config: ServerConfig): McpServer {
       json(
         await client.post(
           `/athlete/${client.athleteId}/events`,
-          compactBody(fields)
+          compactBody(withStartTime(fields))
         )
       )
   );
@@ -1190,7 +1203,9 @@ export function createServer(config: ServerConfig): McpServer {
         "Create several calendar events in one call - a week of sessions, a race " +
         "with its taper. Each entry takes the same fields as create_event. For a " +
         "block worth reusing, a plan (create_folder type PLAN, then apply_plan) " +
-        "is the better tool. Returns the created events.",
+        "is the better tool. Returns the created events. Not all-or-nothing: if " +
+        "the API rejects an entry, the ones before it may already exist, so " +
+        "list_events the range before retrying.",
       inputSchema: schema("create_events", () =>
         z.object({
           events: z
@@ -1205,7 +1220,7 @@ export function createServer(config: ServerConfig): McpServer {
     async ({ events }) => {
       const created = await client.post(
         `/athlete/${client.athleteId}/events/bulk`,
-        events.map((e) => compactBody(e))
+        events.map((e) => compactBody(withStartTime(e)))
       );
       return json(project(created, EVENT_SUMMARY_FIELDS, false));
     }
@@ -1331,15 +1346,15 @@ export function createServer(config: ServerConfig): McpServer {
       title: "Apply training plan",
       description:
         "Put every workout in a training plan onto the calendar, starting from a " +
-        "date: the plan's first day lands on start_date and the rest keep their " +
-          "spacing. " +
+        "date: a workout's `day` is its offset from start_date, so day 0 lands on " +
+        "start_date and day 3 three days later. " +
         "Find plans with list_folders (type PLAN), or build one with create_folder " +
         "and create_workout using `day`. This can add dozens of events at once, so " +
         "confirm the plan and start date with the user first.",
       inputSchema: schema("apply_plan", () =>
         z.object({
           folder_id: z.number().int().describe("ID of the plan (a PLAN folder)"),
-          start_date: isoDate("Date the plan's first day lands on, YYYY-MM-DD"),
+          start_date: isoDate("Date that plan day 0 lands on, YYYY-MM-DD"),
         })
       ),
       annotations: CREATE,
@@ -1471,9 +1486,12 @@ export function createServer(config: ServerConfig): McpServer {
           day: z
             .number()
             .int()
-            .positive()
+            .min(0)
             .optional()
-            .describe("Day within a training plan, 1-based (plans only)"),
+            .describe(
+              "Day within a training plan, counted from 0: day 0 lands on " +
+                "apply_plan's start_date, day 7 a week later (plans only)"
+            ),
         })
       ),
       annotations: CREATE,
@@ -1526,9 +1544,12 @@ export function createServer(config: ServerConfig): McpServer {
           day: z
             .number()
             .int()
-            .positive()
+            .min(0)
             .optional()
-            .describe("Day within a training plan, 1-based (plans only)"),
+            .describe(
+              "Day within a training plan, counted from 0: day 0 lands on " +
+                "apply_plan's start_date, day 7 a week later (plans only)"
+            ),
         })
       ),
       annotations: UPDATE,

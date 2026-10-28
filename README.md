@@ -142,6 +142,9 @@ npm run deploy
 
 ### Automatic deploys
 
+`.github/workflows/test.yml` runs the typecheck and tests on every pull request,
+so a failure shows on the PR before it is merged.
+
 `.github/workflows/deploy.yml` runs the typecheck and tests on every push to
 `main` (so on every merged pull request) and, if they pass, runs
 `wrangler deploy`. It deploys `wrangler.toml` as-is, so the `OAUTH_KV`
@@ -336,8 +339,10 @@ immediately with an actionable message rather than producing a confusing 422
 from the API.
 
 **Requests time out and retry.** Each HTTP attempt is aborted after 30 seconds.
-Responses of 429 or 5xx are retried up to 3 times with exponential backoff,
-honouring a `Retry-After` header when the server sends one. Intervals.icu rate
+Responses of 429 or 5xx, timeouts and dropped connections are retried up to 3
+times with exponential backoff, honouring a `Retry-After` header when the server
+sends one. A POST is retried only on a 429: after a 5xx or a timeout it may
+already have created what it asked for, so the error says to check first. Intervals.icu rate
 limits both per day and per rolling 15-minute window, so this matters in
 practice.
 

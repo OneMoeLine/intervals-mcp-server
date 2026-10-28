@@ -15,6 +15,12 @@ export const MAX_ERROR_BODY = 500;
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
+/** Methods that are safe to send twice. A POST that failed with a 5xx, a
+ *  timeout or a dropped connection may already have created what it asked
+ *  for, so it is retried only on a 429, which the API refuses before doing
+ *  anything. */
+const IDEMPOTENT_METHODS = new Set(["GET", "PUT", "DELETE"]);
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function truncate(text: string, limit = MAX_ERROR_BODY): string {
@@ -104,6 +110,7 @@ export class IntervalsClient {
     }
 
     let lastError = "unknown error";
+    const idempotent = IDEMPOTENT_METHODS.has(method.toUpperCase());
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       let res: Response;
@@ -125,6 +132,12 @@ export class IntervalsClient {
           name === "TimeoutError" || name === "AbortError"
             ? `request timed out after ${this.timeoutMs}ms`
             : `network error: ${err instanceof Error ? err.message : String(err)}`;
+        if (!idempotent) {
+          throw new Error(
+            `Intervals.icu API ${method} failed - ${lastError}. It was not retried, ` +
+              "because it may have gone through: check before trying again."
+          );
+        }
         if (attempt === MAX_RETRIES) break;
         await sleep(this.retryDelay(undefined, attempt));
         continue;
@@ -140,7 +153,10 @@ export class IntervalsClient {
 
       lastError = `${res.status}: ${truncate(await res.text())}`;
 
-      if (!RETRYABLE_STATUS.has(res.status) || attempt === MAX_RETRIES) {
+      const retryable = idempotent
+        ? RETRYABLE_STATUS.has(res.status)
+        : res.status === 429;
+      if (!retryable || attempt === MAX_RETRIES) {
         throw new Error(`Intervals.icu API error ${lastError}`);
       }
       await sleep(this.retryDelay(res, attempt));
