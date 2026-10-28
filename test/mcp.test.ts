@@ -153,6 +153,14 @@ describe("tools/list", () => {
     }
   });
 
+  it("keeps the tool list compact", () => {
+    const wire = JSON.stringify(tools);
+    // Every session sends the whole list to the model, so it has a budget.
+    expect(wire.length).toBeLessThan(36_000);
+    expect(wire).not.toContain('"$schema"');
+    expect(wire).not.toContain(String(Number.MAX_SAFE_INTEGER));
+  });
+
   it("exposes types and max_points on get_activity_streams", () => {
     const schema = tools.find((t) => t.name === "get_activity_streams")
       .inputSchema;
@@ -232,7 +240,7 @@ describe("tools/list", () => {
     });
   });
 
-  it("offers a fields parameter on each of the twelve trimming tools", () => {
+  it("offers a fields parameter on each of the fourteen trimming tools", () => {
     const withFields = tools
       .filter((t) => "fields" in t.inputSchema.properties)
       .map((t) => t.name)
@@ -245,10 +253,12 @@ describe("tools/list", () => {
       "get_hr_curves",
       "get_pace_curves",
       "get_power_curves",
+      "get_workout",
       "list_activities",
       "list_events",
       "list_folders",
       "list_wellness",
+      "list_workouts",
       "search_intervals",
     ]);
   });
@@ -799,8 +809,8 @@ describe("write tools against the fake API", () => {
   });
 
   it("POSTs a library workout into its folder", async () => {
-    fake.replyWith({ body: { id: 7 } });
-    await server.request("tools/call", {
+    fake.replyWith({ body: { id: 7, name: "Sweet spot 3x12", workout_doc: { zoneTimes: [] } } });
+    const res = await server.request("tools/call", {
       name: "create_workout",
       arguments: {
         folder_id: 3,
@@ -817,6 +827,10 @@ describe("write tools against the fake API", () => {
       folder_id: 3,
       name: "Sweet spot 3x12",
       type: "Ride",
+    });
+    expect(JSON.parse(res.result.content[0].text)).toEqual({
+      id: 7,
+      name: "Sweet spot 3x12",
     });
   });
 
@@ -971,8 +985,8 @@ describe("bulk events, comments and gear", () => {
   });
 
   it("posts a comment, and refuses a blank one", async () => {
-    fake.replyWith({ body: { id: 6 } });
-    await server.request("tools/call", {
+    fake.replyWith({ body: { id: 6, new_chat: { id: 9, members: [] } } });
+    const res = await server.request("tools/call", {
       name: "add_activity_message",
       arguments: { activity_id: "i77", content: "Thanks!" },
     });
@@ -980,6 +994,12 @@ describe("bulk events, comments and gear", () => {
     expect(req.method).toBe("POST");
     expect(req.path).toBe("/activity/i77/messages");
     expect(JSON.parse(req.body)).toEqual({ content: "Thanks!" });
+    // The chat record the API sends back is dropped.
+    expect(JSON.parse(res.result.content[0].text)).toEqual({
+      id: 6,
+      activity_id: "i77",
+      content: "Thanks!",
+    });
 
     const before = fake.requests.length;
     const blank = await server.request("tools/call", {

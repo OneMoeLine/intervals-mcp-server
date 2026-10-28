@@ -163,8 +163,16 @@ was undone where a tool allows it:
 - `search_intervals`: an 8-25 minute search at 90-110% returned single
   efforts of that length at threshold pace, as expected.
 
-Worth trimming later: `create_workout` and `list_workouts` return each
-workout's full `workout_doc` with per-zone times, about 2 KB a workout.
+### Trimming the tool list
+
+`tools/list` goes to the model at the start of every session. On 2026-10-28
+it was 45 KB (about 11k tokens), half of it descriptions. It is now about
+34 KB: descriptions were cut to what a model needs to pick and call a tool,
+zod's `$schema` URI and the +/-2^53 bounds of an unbounded `.int()` are
+dropped from the advertised JSON Schema, and a test holds the list under
+36 KB. Results were trimmed too: library workouts default to a summary
+without the ~2 KB `workout_doc`, and a posted comment returns its ID rather
+than the whole chat record.
 
 ## Tier 1 — next up
 

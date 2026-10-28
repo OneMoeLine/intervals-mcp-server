@@ -57,14 +57,30 @@ export const EVENT_SUMMARY_FIELDS = [
   "show_as_note",
 ];
 
+/** Library workouts carry a parsed `workout_doc` with per-zone times, about
+ *  2 KB each; `description` holds the same steps as workout syntax. */
+export const WORKOUT_SUMMARY_FIELDS = [
+  "id",
+  "name",
+  "type",
+  "folder_id",
+  "day",
+  "description",
+  "moving_time",
+  "distance",
+  "indoor",
+  "target",
+  "icu_training_load",
+  "icu_intensity",
+];
+
 /** Shared `fields` input. */
 export const fieldsParam = (summary: string[], total: number) =>
   z
     .array(z.string())
     .optional()
     .describe(
-      `Fields to return. Defaults to a compact ${summary.length}-field summary; ` +
-        `the full record has ~${total} fields, many of them null. Pass ["*"] for everything.`
+      `Fields to return (default: ${summary.length} of ~${total}; ["*"] for all)`
     );
 
 /** Interval search returns whole activities; the match is in
@@ -542,12 +558,9 @@ export const EVENT_CATEGORIES = [
  *  picking the wrong one is the most likely way for a calendar write to go
  *  wrong, and a bare enum does not say which race letter means what. */
 export const EVENT_CATEGORY_HELP =
-  "WORKOUT = planned session (put workout syntax in `description`); " +
-  "RACE_A/RACE_B/RACE_C = races by priority, A highest; " +
-  "NOTE = calendar note; PLAN = training-plan phase block (needs end_date_local); " +
-  "HOLIDAY/SICK/INJURED = time off, usually a date range; " +
-  "TARGET = performance goal; SET_EFTP/SET_FITNESS/FITNESS_DAYS/SEASON_START = " +
-  "fitness-chart adjustments on a date.";
+  "Categories: WORKOUT; RACE_A/B/C (A = top priority); NOTE; PLAN (a phase, " +
+  "needs end_date_local); HOLIDAY/SICK/INJURED (time off); TARGET (a goal); " +
+  "SET_EFTP/SET_FITNESS/FITNESS_DAYS/SEASON_START (fitness-chart adjustments).";
 
 /** The wellness fields the fitness chart is built from. CTL and ATL are the
  *  fitness model; the load pair is what fed them that day. */
