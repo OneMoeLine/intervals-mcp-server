@@ -662,7 +662,8 @@ describe("write tools against the fake API", () => {
     const put = fake.requests[fake.requests.length - 1];
     expect(put.method).toBe("PUT");
     expect(put.path).toBe("/athlete/i1/sport-settings/12");
-    expect(put.query).toEqual({ recalcHrZones: "true" });
+    // A pace change does not touch HR, so the HR zones are left as they are.
+    expect(put.query).toEqual({ recalcHrZones: "false" });
     expect(JSON.parse(put.body)).toEqual({ threshold_pace: 4.2373 });
     const payload = JSON.parse(res.result.content[0].text);
     expect(payload).toMatchObject({
@@ -670,6 +671,20 @@ describe("write tools against the fake API", () => {
       before: { threshold_pace: 4.0 },
       after: { threshold_pace: 4.2373 },
     });
+  });
+
+  it("recalculates hr zones by default when lthr or max hr changes", async () => {
+    fake.replyUsing((req) =>
+      req.method === "GET" ? { body: SPORT_SETTINGS } : { body: SPORT_SETTINGS[0] }
+    );
+    for (const change of [{ lthr: 175 }, { max_hr: 195 }]) {
+      await server.request("tools/call", {
+        name: "update_sport_settings",
+        arguments: { sport: "Ride", ...change },
+      });
+      const put = fake.requests[fake.requests.length - 1];
+      expect(put.query).toEqual({ recalcHrZones: "true" });
+    }
   });
 
   it("leaves hr zones alone when they are supplied explicitly", async () => {
@@ -919,7 +934,8 @@ describe("bulk events, comments and gear", () => {
     expect(req.path).toBe("/athlete/i1/events/bulk");
     expect(JSON.parse(req.body)).toEqual([
       { start_date_local: "2026-11-02T00:00:00", category: "WORKOUT", name: "Easy", type: "Run" },
-      { start_date_local: "2026-11-04", category: "WORKOUT", name: "Tempo", type: "Run", moving_time: 3600 },
+      // The bulk endpoint refuses a bare date, so it goes out as midnight.
+      { start_date_local: "2026-11-04T00:00:00", category: "WORKOUT", name: "Tempo", type: "Run", moving_time: 3600 },
     ]);
     const created = JSON.parse(res.result.content[0].text);
     expect(created).toHaveLength(2);
