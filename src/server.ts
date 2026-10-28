@@ -235,8 +235,8 @@ export function createServer(config: ServerConfig): McpServer {
       description:
         "The athlete's identity, physiology and account info. fields " +
         '["sportSettings"] adds per-sport FTP, thresholds and zones (~10 KB). ' +
-        "Credentials are always withheld; email and date of birth only when " +
-        "named in fields.",
+        "Includes the public profile (name, bio, location). Credentials are " +
+        "always withheld; email and date of birth only when named in fields.",
       inputSchema: schema("get_athlete", () =>
         z.object({
           fields: fieldsParam(ATHLETE_SUMMARY_FIELDS, 162),
@@ -248,19 +248,6 @@ export function createServer(config: ServerConfig): McpServer {
       const data = await client.get(`/athlete/${client.athleteId}`);
       return json(projectFields(data, fields, ATHLETE_SUMMARY_FIELDS));
     }
-  );
-
-  server.registerTool(
-    "get_athlete_profile",
-    {
-      title: "Get athlete public profile",
-      description:
-        "Get public profile info for the athlete (name, bio, location, etc.).",
-      inputSchema: schema("get_athlete_profile", () => z.object({})),
-      annotations: READ_ONLY,
-    },
-    async () =>
-      json(await client.get(`/athlete/${client.athleteId}/profile`))
   );
 
   server.registerTool(
@@ -832,115 +819,65 @@ export function createServer(config: ServerConfig): McpServer {
   /** Power, HR and pace curves are one endpoint family: same request shape, same
    *  wrapper back - a `list` of curves plus an `activities` lookup map roughly as
    *  large as the curves themselves. Only the path, the summary set and pace's
-   *  grade-adjustment flag differ, so all three tools register through here. */
-  function registerCurveTool({
-    name,
-    title,
-    description,
-    path,
-    summary,
-    total,
-    extra,
-  }: {
-    name: string;
-    title: string;
-    description: string;
-    path: string;
-    summary: string[];
-    /** Field count of the untrimmed record, for the `fields` description. */
-    total: number;
-    /** Query parameters only this endpoint takes, slotted in before `fields`. */
-    extra?: z.ZodRawShape;
-  }) {
-    server.registerTool(
-      name,
-      {
-        title,
-        description,
-        inputSchema: schema(name, () =>
-          z.object({
-            type: z
-              .string()
-              .describe(
-                "Exactly one sport type, e.g. Ride, Run, Swim"
-              ),
-            oldest: isoDate("Start date YYYY-MM-DD").optional(),
-            newest: isoDate("End date YYYY-MM-DD").optional(),
-            curves: z
-              .string()
-              .optional()
-              .describe(
-                'Which curves, e.g. "42d" or "all"'
-              ),
-            ...extra,
-            fields: fieldsParam(summary, total),
-          })
-        ),
-        annotations: READ_ONLY,
-      },
-      async ({ fields, ...rest }) => {
-        // Everything that is not `fields` is a query parameter; a boolean goes
-        // over the wire as "true"/"false".
-        const params: Record<string, string> = Object.fromEntries(
-          Object.entries(compactBody(rest)).map(([k, v]) => [k, String(v)])
-        );
-        const data = await client.get(
-          `/athlete/${client.athleteId}${path}`,
-          params
-        );
-        if (fields?.includes("*")) return json(data);
+   *  grade-adjustment flag differ, so one tool serves all three. */
+  const CURVES = {
+    power: { path: "/power-curves", summary: POWER_CURVE_SUMMARY_FIELDS },
+    hr: { path: "/hr-curves", summary: HR_CURVE_SUMMARY_FIELDS },
+    pace: { path: "/pace-curves", summary: PACE_CURVE_SUMMARY_FIELDS },
+  } as const;
 
-        const trimmed = projectNestedFields(data, ["list"], fields, summary);
-        // `activities` is a lookup map roughly as large as the curves themselves.
-        if (trimmed && typeof trimmed === "object" && !Array.isArray(trimmed)) {
-          const { activities, ...kept } = trimmed as Record<string, unknown>;
-          return json(kept);
-        }
-        return json(trimmed);
-      }
-    );
-  }
-
-  registerCurveTool({
-    name: "get_power_curves",
-    title: "Get power curves",
-    description:
-      "Best power held for each duration, across one sport's activities: " +
-      "`secs` against `values`.",
-    path: "/power-curves",
-    summary: POWER_CURVE_SUMMARY_FIELDS,
-    total: 20,
-  });
-
-  registerCurveTool({
-    name: "get_hr_curves",
-    title: "Get HR curves",
-    description:
-      "Highest average HR held for each duration, across one sport's " +
-      "activities: `secs` against `values`.",
-    path: "/hr-curves",
-    summary: HR_CURVE_SUMMARY_FIELDS,
-    total: 18,
-  });
-
-  registerCurveTool({
-    name: "get_pace_curves",
-    title: "Get pace curves",
-    description:
-      "Best times across one sport's activities, by distance: `distance` " +
-      "(m) against `values` (s).",
-    path: "/pace-curves",
-    summary: PACE_CURVE_SUMMARY_FIELDS,
-    total: 20,
-    extra: {
-      gap: z
-        .boolean()
-        .optional()
-        .describe(
-          "Grade adjusted pace instead; each curve's `type` says PACE or GAP"
-        ),
+  server.registerTool(
+    "get_curves",
+    {
+      title: "Get best-effort curves",
+      description:
+        "Best efforts across one sport's activities. power: best watts held " +
+        "for each duration; hr: highest average HR for each duration (both " +
+        "`secs` against `values`). pace: best times by distance, `distance` " +
+        "(m) against `values` (s).",
+      inputSchema: schema("get_curves", () =>
+        z.object({
+          metric: z.enum(["power", "hr", "pace"]).describe("Which curve"),
+          type: z.string().describe("Exactly one sport type, e.g. Ride, Run, Swim"),
+          oldest: isoDate("Start date YYYY-MM-DD").optional(),
+          newest: isoDate("End date YYYY-MM-DD").optional(),
+          curves: z.string().optional().describe('Which curves, e.g. "42d" or "all"'),
+          gap: z
+            .boolean()
+            .optional()
+            .describe(
+              "pace only: grade adjusted pace; each curve's `type` says PACE or GAP"
+            ),
+          fields: z
+            .array(z.string())
+            .optional()
+            .describe('Fields per curve (default: a summary; ["*"] for all)'),
+        })
+      ),
+      annotations: READ_ONLY,
     },
-  });
+    async ({ metric, fields, ...rest }) => {
+      if (rest.gap !== undefined && metric !== "pace") {
+        throw new Error("gap applies only to metric pace.");
+      }
+      const { path, summary } = CURVES[metric];
+      // Everything else is a query parameter; a boolean goes over the wire as
+      // "true"/"false".
+      const params: Record<string, string> = Object.fromEntries(
+        Object.entries(compactBody(rest)).map(([k, v]) => [k, String(v)])
+      );
+      const data = await client.get(`/athlete/${client.athleteId}${path}`, params);
+      if (fields?.includes("*")) return json(data);
+
+      const trimmed = projectNestedFields(data, ["list"], fields, summary);
+      // `activities` is a lookup map roughly as large as the curves themselves.
+      if (trimmed && typeof trimmed === "object" && !Array.isArray(trimmed)) {
+        const { activities, ...kept } = trimmed as Record<string, unknown>;
+        return json(kept);
+      }
+      return json(trimmed);
+    }
+  );
 
   // ── Wellness ───────────────────────────────────────────────────────────────
 
@@ -950,39 +887,23 @@ export function createServer(config: ServerConfig): McpServer {
       title: "List wellness records",
       description:
         "Wellness records in a date range: CTL/ATL, HRV, resting HR, sleep, " +
-        "weight, subjective scores.",
+        "weight, subjective scores. For one day, give only oldest.",
       inputSchema: schema("list_wellness", () =>
         z.object({
           oldest: isoDate("Start date YYYY-MM-DD"),
-          newest: isoDate("End date YYYY-MM-DD"),
+          newest: isoDate("End date YYYY-MM-DD (default: oldest)").optional(),
           fields: fieldsParam(WELLNESS_SUMMARY_FIELDS, 47),
         })
       ),
       annotations: READ_ONLY,
     },
-    async ({ oldest, newest, fields }) => {
+    async ({ oldest, newest = oldest, fields }) => {
       const data = await client.get(`/athlete/${client.athleteId}/wellness`, {
         oldest,
         newest,
       });
       return json(projectFields(data, fields, WELLNESS_SUMMARY_FIELDS));
     }
-  );
-
-  server.registerTool(
-    "get_wellness",
-    {
-      title: "Get wellness record",
-      description: "Get the wellness record for a specific date.",
-      inputSchema: schema("get_wellness", () =>
-        z.object({
-          date: isoDate("Date in YYYY-MM-DD format"),
-        })
-      ),
-      annotations: READ_ONLY,
-    },
-    async ({ date }) =>
-      json(await client.get(`/athlete/${client.athleteId}/wellness/${date}`))
   );
 
   server.registerTool(
@@ -1125,8 +1046,7 @@ export function createServer(config: ServerConfig): McpServer {
       ? { ...e, start_date_local: `${e.start_date_local}T00:00:00` }
       : e;
 
-  /** The fields of one new calendar event, shared by create_event and the
-   *  per-event entries of create_events. */
+  /** The fields of one new calendar event: an entry of create_events. */
   const newEventShape = () => ({
     start_date_local: isoDateTime(
       "Start, e.g. 2024-06-01 or 2024-06-01T08:00:00"
@@ -1169,34 +1089,17 @@ export function createServer(config: ServerConfig): McpServer {
   });
 
   server.registerTool(
-    "create_event",
-    {
-      title: "Create calendar event",
-      description:
-        "Create a calendar event: a planned workout, race, note or time off. For a " +
-        "structured WORKOUT put workout syntax (intervals-icu://workout-syntax) in " +
-        "`description`; text it cannot parse is kept as plain notes with no load. " +
-        EVENT_CATEGORY_HELP,
-      inputSchema: schema("create_event", () => z.object(newEventShape())),
-      annotations: CREATE,
-    },
-    async (fields) =>
-      json(
-        await client.post(
-          `/athlete/${client.athleteId}/events`,
-          compactBody(withStartTime(fields))
-        )
-      )
-  );
-
-  server.registerTool(
     "create_events",
     {
       title: "Create calendar events",
       description:
-        "Create several calendar events in one call; each entry is shaped " +
-        "like create_event. Not all-or-nothing: after an error, entries " +
-        "before the bad one may exist, so list_events before retrying.",
+        "Create calendar events - one, or a week of sessions in one call: " +
+        "planned workouts, races, notes, time off. For a structured WORKOUT " +
+        "put workout syntax (intervals-icu://workout-syntax) in `description`; " +
+        "text it cannot parse is kept as plain notes with no load. Not " +
+        "all-or-nothing: after an error, entries before the bad one may exist, " +
+        "so list_events before retrying. " +
+        EVENT_CATEGORY_HELP,
       inputSchema: schema("create_events", () =>
         z.object({
           events: z
@@ -1720,51 +1623,27 @@ export function createServer(config: ServerConfig): McpServer {
     });
 
   server.registerTool(
-    "add_gear_reminder",
+    "set_gear_reminder",
     {
-      title: "Add gear maintenance reminder",
+      title: "Add or change a gear reminder",
       description:
         "Add a maintenance reminder to gear, e.g. \"Replace chain\" every 3000 " +
-        "km or \"Service fork\" every 50 hours.",
-      inputSchema: schema("add_gear_reminder", () =>
+        "km or \"Service fork\" every 50 hours. With reminder_id (from " +
+        "list_gear), change that reminder instead, or reset it once the " +
+        "maintenance is done; only supply what should change.",
+      inputSchema: schema("set_gear_reminder", () =>
         z.object({
           gear_id: gearId(),
-          name: z.string().min(1).describe("What to do, e.g. Replace chain"),
-          every_km: z.number().positive().optional().describe("Due every N km"),
-          every_hours: z
+          reminder_id: z
             .number()
-            .positive()
+            .int()
             .optional()
-            .describe("Due every N hours of use"),
-        })
-      ),
-      annotations: CREATE,
-    },
-    async ({ gear_id, ...fields }) => {
-      if (fields.every_km === undefined && fields.every_hours === undefined) {
-        throw new Error("Give the reminder every_km, every_hours, or both.");
-      }
-      return json(
-        await client.post(
-          `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder`,
-          reminderBody(fields)
-        )
-      );
-    }
-  );
-
-  server.registerTool(
-    "update_gear_reminder",
-    {
-      title: "Update gear maintenance reminder",
-      description:
-        "Change a gear reminder, or reset it once the maintenance is done. " +
-        "Reminder IDs are in list_gear. Only supply what should change.",
-      inputSchema: schema("update_gear_reminder", () =>
-        z.object({
-          gear_id: gearId(),
-          reminder_id: z.number().int().describe("The reminder ID"),
-          name: z.string().min(1).optional().describe("New reminder text"),
+            .describe("The reminder to change; omit to add a new one"),
+          name: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("What to do, e.g. Replace chain (needed for a new one)"),
           every_km: z.number().positive().optional().describe("Due every N km"),
           every_hours: z
             .number()
@@ -1774,15 +1653,35 @@ export function createServer(config: ServerConfig): McpServer {
           reset: z
             .boolean()
             .optional()
-            .describe(
-              "Maintenance done: restart the count from now"
-            ),
+            .describe("Maintenance done: restart the count from now"),
         })
       ),
-      annotations: UPDATE,
+      // Adds a record without reminder_id and overwrites one with it, so it
+      // is neither idempotent nor safe from overwriting.
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
     },
-    async ({ gear_id, reminder_id, reset = false, ...fields }) => {
+    async ({ gear_id, reminder_id, reset, ...fields }) => {
       const body = reminderBody(fields);
+      const gearPath = `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder`;
+
+      if (reminder_id === undefined) {
+        if (reset !== undefined) {
+          throw new Error("reset needs the reminder_id of an existing reminder.");
+        }
+        if (fields.name === undefined) {
+          throw new Error("A new reminder needs a name.");
+        }
+        if (fields.every_km === undefined && fields.every_hours === undefined) {
+          throw new Error("Give the reminder every_km, every_hours, or both.");
+        }
+        return json(await client.post(gearPath, body));
+      }
+
       if (Object.keys(body).length === 0 && !reset) {
         throw new Error(
           "Nothing to change: supply name, every_km, every_hours or reset."
@@ -1793,8 +1692,8 @@ export function createServer(config: ServerConfig): McpServer {
       return json(
         await client.request(
           "PUT",
-          `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder/${segment(reminder_id)}`,
-          { reset: String(reset), snoozeDays: "0" },
+          `${gearPath}/${segment(reminder_id)}`,
+          { reset: String(reset ?? false), snoozeDays: "0" },
           body
         )
       );

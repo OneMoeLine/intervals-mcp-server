@@ -6,7 +6,6 @@ import { ACTIVITY_SUMMARY_FIELDS } from "../src/transform.js";
 /** The tools the server is contracted to expose, in registration order. */
 const EXPECTED_TOOLS = [
   "get_athlete",
-  "get_athlete_profile",
   "update_sport_settings",
   "list_activities",
   "get_activity",
@@ -21,16 +20,12 @@ const EXPECTED_TOOLS = [
   "get_activity_messages",
   "add_activity_message",
   "update_activity",
-  "get_power_curves",
-  "get_hr_curves",
-  "get_pace_curves",
+  "get_curves",
   "list_wellness",
-  "get_wellness",
   "update_wellness",
   "get_fitness_chart",
   "list_events",
   "get_event",
-  "create_event",
   "create_events",
   "update_event",
   "duplicate_events",
@@ -46,8 +41,7 @@ const EXPECTED_TOOLS = [
   "list_gear",
   "create_gear",
   "update_gear",
-  "add_gear_reminder",
-  "update_gear_reminder",
+  "set_gear_reminder",
   "list_routes",
   "get_route",
 ];
@@ -58,9 +52,7 @@ const EXPECTED_TOOLS = [
  *  them; "none" takes them away, which has its own test. */
 const EXPECTED_WRITERS = [
   "add_activity_message",
-  "add_gear_reminder",
   "apply_plan",
-  "create_event",
   "create_events",
   "create_folder",
   "create_gear",
@@ -68,10 +60,10 @@ const EXPECTED_WRITERS = [
   "delete_event",
   "delete_workout",
   "duplicate_events",
+  "set_gear_reminder",
   "update_activity",
   "update_event",
   "update_gear",
-  "update_gear_reminder",
   "update_sport_settings",
   "update_wellness",
   "update_workout",
@@ -121,8 +113,8 @@ describe("startup", () => {
 });
 
 describe("tools/list", () => {
-  it("exposes all 45 tools", () => {
-    expect(tools).toHaveLength(45);
+  it("exposes all 39 tools", () => {
+    expect(tools).toHaveLength(39);
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());
   });
 
@@ -156,7 +148,7 @@ describe("tools/list", () => {
   it("keeps the tool list compact", () => {
     const wire = JSON.stringify(tools);
     // Every session sends the whole list to the model, so it has a budget.
-    expect(wire.length).toBeLessThan(36_000);
+    expect(wire.length).toBeLessThan(32_000);
     expect(wire).not.toContain('"$schema"');
     expect(wire).not.toContain(String(Number.MAX_SAFE_INTEGER));
   });
@@ -195,7 +187,7 @@ describe("tools/list", () => {
     }
   });
 
-  it("reports exactly eighteen writers, and they are the expected eighteen", () => {
+  it("reports exactly sixteen writers, and they are the expected sixteen", () => {
     const writers = tools
       .filter((t) => t.annotations?.readOnlyHint === false)
       .map((t) => t.name)
@@ -227,7 +219,7 @@ describe("tools/list", () => {
       idempotentHint: true,
     });
     // Only ever adds - but a second call adds a second calendar entry.
-    expect(annotationsFor("create_event")).toMatchObject({
+    expect(annotationsFor("create_events")).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
@@ -240,7 +232,7 @@ describe("tools/list", () => {
     });
   });
 
-  it("offers a fields parameter on each of the fourteen trimming tools", () => {
+  it("offers a fields parameter on each of the twelve trimming tools", () => {
     const withFields = tools
       .filter((t) => "fields" in t.inputSchema.properties)
       .map((t) => t.name)
@@ -249,10 +241,8 @@ describe("tools/list", () => {
       "get_activity",
       "get_activity_intervals",
       "get_athlete",
+      "get_curves",
       "get_event",
-      "get_hr_curves",
-      "get_pace_curves",
-      "get_power_curves",
       "get_workout",
       "list_activities",
       "list_events",
@@ -409,28 +399,34 @@ describe("tools/call against the fake API", () => {
     expect(JSON.parse(sent.body)).toEqual({ restingHR: 48, mood: 4 });
   });
 
-  it("POSTs a new calendar event", async () => {
-    fake.replyWith({ body: { id: 99 } });
+  it("POSTs a single new calendar event as a one-entry batch", async () => {
+    fake.replyWith({ body: [{ id: 99 }] });
     await server.request("tools/call", {
-      name: "create_event",
+      name: "create_events",
       arguments: {
-        start_date_local: "2024-07-01T08:00:00",
-        category: "WORKOUT",
-        name: "Threshold intervals",
+        events: [
+          {
+            start_date_local: "2024-07-01T08:00:00",
+            category: "WORKOUT",
+            name: "Threshold intervals",
+          },
+        ],
       },
     });
 
     const sent = fake.requests[fake.requests.length - 1];
     expect(sent.method).toBe("POST");
-    expect(sent.path).toBe("/athlete/i1/events");
-    expect(JSON.parse(sent.body)).toMatchObject({
-      start_date_local: "2024-07-01T08:00:00",
-      category: "WORKOUT",
-      name: "Threshold intervals",
-    });
+    expect(sent.path).toBe("/athlete/i1/events/bulk");
+    expect(JSON.parse(sent.body)).toEqual([
+      {
+        start_date_local: "2024-07-01T08:00:00",
+        category: "WORKOUT",
+        name: "Threshold intervals",
+      },
+    ]);
   });
 
-  it("drops the activities lookup map from get_power_curves", async () => {
+  it("drops the activities lookup map from get_curves", async () => {
     fake.replyWith({
       body: {
         list: [
@@ -440,8 +436,8 @@ describe("tools/call against the fake API", () => {
       },
     });
     const res = await server.request("tools/call", {
-      name: "get_power_curves",
-      arguments: { type: "Ride", fields: ["id", "label", "secs", "values"] },
+      name: "get_curves",
+      arguments: { metric: "power", type: "Ride", fields: ["id", "label", "secs", "values"] },
     });
 
     expect(fake.requests[fake.requests.length - 1].query).toEqual({
@@ -461,10 +457,32 @@ describe("tools/call against the fake API", () => {
     };
     fake.replyWith({ body });
     const res = await server.request("tools/call", {
-      name: "get_power_curves",
-      arguments: { type: "Ride", fields: ["*"] },
+      name: "get_curves",
+      arguments: { metric: "power", type: "Ride", fields: ["*"] },
     });
     expect(JSON.parse(res.result.content[0].text)).toEqual(body);
+  });
+
+  it("reads one day of wellness when only oldest is given", async () => {
+    fake.replyWith({ body: [{ id: "2026-10-01", ctl: 50 }] });
+    await server.request("tools/call", {
+      name: "list_wellness",
+      arguments: { oldest: "2026-10-01" },
+    });
+    const sent = fake.requests[fake.requests.length - 1];
+    expect(sent.path).toBe("/athlete/i1/wellness");
+    expect(sent.query).toEqual({ oldest: "2026-10-01", newest: "2026-10-01" });
+  });
+
+  it("refuses gap on a curve other than pace, before any HTTP call", async () => {
+    const before = fake.requests.length;
+    const res = await server.request("tools/call", {
+      name: "get_curves",
+      arguments: { metric: "power", type: "Ride", gap: true },
+    });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toMatch(/gap applies only to metric pace/);
+    expect(fake.requests).toHaveLength(before);
   });
 
   it("trims an hr curve to the summary fields by default", async () => {
@@ -488,8 +506,8 @@ describe("tools/call against the fake API", () => {
       },
     });
     const res = await server.request("tools/call", {
-      name: "get_hr_curves",
-      arguments: { type: "Run", curves: "42d" },
+      name: "get_curves",
+      arguments: { metric: "hr", type: "Run", curves: "42d" },
     });
 
     const sent = fake.requests[fake.requests.length - 1];
@@ -529,8 +547,8 @@ describe("tools/call against the fake API", () => {
 
     fake.replyWith({ body: paceBody("PACE") });
     const plain = await server.request("tools/call", {
-      name: "get_pace_curves",
-      arguments: { type: "Run" },
+      name: "get_curves",
+      arguments: { metric: "pace", type: "Run" },
     });
     expect(fake.requests[fake.requests.length - 1].query).toEqual({
       type: "Run",
@@ -538,8 +556,8 @@ describe("tools/call against the fake API", () => {
 
     fake.replyWith({ body: paceBody("GAP") });
     const adjusted = await server.request("tools/call", {
-      name: "get_pace_curves",
-      arguments: { type: "Run", gap: true },
+      name: "get_curves",
+      arguments: { metric: "pace", type: "Run", gap: true },
     });
     const sent = fake.requests[fake.requests.length - 1];
     expect(sent.path).toBe("/athlete/i1/pace-curves");
@@ -735,12 +753,16 @@ describe("write tools against the fake API", () => {
   it("rejects a category the API does not have, before any HTTP call", async () => {
     const before = fake.requests.length;
     const res = await server.request("tools/call", {
-      name: "create_event",
+      name: "create_events",
       arguments: {
-        start_date_local: "2024-07-01T08:00:00",
-        // The obvious guess, and not a category: races are RACE_A/B/C.
-        category: "RACE",
-        type: "Ride",
+        events: [
+          {
+            start_date_local: "2024-07-01T08:00:00",
+            // The obvious guess, and not a category: races are RACE_A/B/C.
+            category: "RACE",
+            type: "Ride",
+          },
+        ],
       },
     });
     expect(res.result.isError).toBe(true);
@@ -748,12 +770,10 @@ describe("write tools against the fake API", () => {
     expect(fake.requests).toHaveLength(before);
   });
 
-  it("carries workout syntax through create_event as the description", async () => {
-    fake.replyWith({ body: { id: 101 } });
+  it("carries workout syntax through create_events as the description", async () => {
+    fake.replyWith({ body: [{ id: 101 }] });
     const steps = "Warmup\n- 10m 60%\n\nMain Set 3x\n- 5m 105%\n- 3m 50%\n";
-    await server.request("tools/call", {
-      name: "create_event",
-      arguments: {
+    const event = {
         start_date_local: "2024-07-02T06:30:00",
         category: "WORKOUT",
         type: "Ride",
@@ -761,22 +781,17 @@ describe("write tools against the fake API", () => {
         description: steps,
         indoor: true,
         target: "POWER",
-      },
+      };
+    await server.request("tools/call", {
+      name: "create_events",
+      arguments: { events: [event] },
     });
 
     const sent = fake.requests[fake.requests.length - 1];
     expect(sent.method).toBe("POST");
-    expect(sent.path).toBe("/athlete/i1/events");
+    expect(sent.path).toBe("/athlete/i1/events/bulk");
     // Sent verbatim: Intervals.icu is what parses the steps, not this server.
-    expect(JSON.parse(sent.body)).toEqual({
-      start_date_local: "2024-07-02T06:30:00",
-      category: "WORKOUT",
-      type: "Ride",
-      name: "VO2 blocks",
-      description: steps,
-      indoor: true,
-      target: "POWER",
-    });
+    expect(JSON.parse(sent.body)).toEqual([event]);
   });
 
   it("PUTs only the supplied fields on update_activity", async () => {
@@ -1042,7 +1057,7 @@ describe("bulk events, comments and gear", () => {
   it("converts reminder thresholds to metres and seconds", async () => {
     fake.replyWith({ body: { id: "b1", reminders: [] } });
     await server.request("tools/call", {
-      name: "add_gear_reminder",
+      name: "set_gear_reminder",
       arguments: { gear_id: "b1", name: "Replace chain", every_km: 3000, every_hours: 1.5 },
     });
     const add = fake.requests[fake.requests.length - 1];
@@ -1051,7 +1066,7 @@ describe("bulk events, comments and gear", () => {
     expect(JSON.parse(add.body)).toEqual({ name: "Replace chain", distance: 3_000_000, time: 5400 });
 
     await server.request("tools/call", {
-      name: "update_gear_reminder",
+      name: "set_gear_reminder",
       arguments: { gear_id: "b1", reminder_id: 9, every_km: 2500 },
     });
     const upd = fake.requests[fake.requests.length - 1];
@@ -1061,7 +1076,7 @@ describe("bulk events, comments and gear", () => {
     expect(JSON.parse(upd.body)).toEqual({ distance: 2_500_000 });
 
     await server.request("tools/call", {
-      name: "update_gear_reminder",
+      name: "set_gear_reminder",
       arguments: { gear_id: "b1", reminder_id: 9, reset: true },
     });
     const done = fake.requests[fake.requests.length - 1];
@@ -1069,13 +1084,20 @@ describe("bulk events, comments and gear", () => {
     expect(JSON.parse(done.body)).toEqual({});
   });
 
-  it("refuses a reminder with no threshold, before any HTTP call", async () => {
+  it("refuses a new reminder without a name or a threshold, or with reset", async () => {
     const before = fake.requests.length;
-    const res = await server.request("tools/call", {
-      name: "add_gear_reminder",
-      arguments: { gear_id: "b1", name: "Replace chain" },
-    });
-    expect(res.result.isError).toBe(true);
+    for (const [args, message] of [
+      [{ gear_id: "b1", name: "Replace chain" }, /every_km, every_hours/],
+      [{ gear_id: "b1", every_km: 3000 }, /needs a name/],
+      [{ gear_id: "b1", name: "Replace chain", every_km: 3000, reset: true }, /reset needs the reminder_id/],
+    ] as const) {
+      const res = await server.request("tools/call", {
+        name: "set_gear_reminder",
+        arguments: args,
+      });
+      expect(res.result.isError).toBe(true);
+      expect(res.result.content[0].text).toMatch(message);
+    }
     expect(fake.requests.length).toBe(before);
   });
 });
@@ -1289,7 +1311,6 @@ describe("credential redaction", () => {
 
   const READERS: [string, Record<string, unknown>][] = [
     ["get_athlete", { fields: ["*"] }],
-    ["get_athlete_profile", {}],
     ["get_activity", { activity_id: "i1", fields: ["*"] }],
     ["get_workout", { workout_id: "9" }],
     ["get_route", { route_id: "12" }],
@@ -1466,7 +1487,7 @@ describe("delete modes", () => {
     expect(names).not.toContain("delete_event");
     expect(names).not.toContain("delete_workout");
     // The rest of the server is unaffected.
-    expect(names).toContain("create_event");
+    expect(names).toContain("create_events");
     await s.stop();
   }, 20_000);
 
