@@ -163,8 +163,24 @@ was undone where a tool allows it:
 - `search_intervals`: an 8-25 minute search at 90-110% returned single
   efforts of that length at threshold pace, as expected.
 
-Worth trimming later: `create_workout` and `list_workouts` return each
-workout's full `workout_doc` with per-zone times, about 2 KB a workout.
+### Trimming the tool list
+
+`tools/list` goes to the model at the start of every session. On 2026-10-28
+it was 45 KB (about 11k tokens), half of it descriptions. It is now about
+30 KB: descriptions were cut to what a model needs to pick and call a tool,
+zod's `$schema` URI and the +/-2^53 bounds of an unbounded `.int()` are
+dropped from the advertised JSON Schema, and a test holds the list under
+32 KB.
+
+Overlapping tools were merged too, 45 to 39: `get_power_curves`,
+`get_hr_curves` and `get_pace_curves` became `get_curves` with a `metric`;
+`create_event` went, since `create_events` takes a one-entry list;
+`add_gear_reminder` and `update_gear_reminder` became `set_gear_reminder`
+(an update when given a `reminder_id`); `get_wellness` became `list_wellness`
+with only `oldest`; and `get_athlete_profile` went, since `get_athlete`
+already carries the name, bio and location. Results were trimmed too: library workouts default to a summary
+without the ~2 KB `workout_doc`, and a posted comment returns its ID rather
+than the whole chat record.
 
 ## Tier 1 — next up
 

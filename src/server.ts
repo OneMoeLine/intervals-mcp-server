@@ -8,6 +8,7 @@ import {
   DEFAULT_STREAM_POINTS,
   EVENT_CATEGORIES,
   EVENT_CATEGORY_HELP,
+  WORKOUT_SUMMARY_FIELDS,
   EVENT_SUMMARY_FIELDS,
   FITNESS_FIELDS,
   FOLDER_SUMMARY_FIELDS,
@@ -69,10 +70,44 @@ const schemas = new Map<string, z.ZodObject>();
 function schema<T extends z.ZodObject>(name: string, build: () => T): T {
   let cached = schemas.get(name) as T | undefined;
   if (!cached) {
-    cached = build();
+    cached = withCompactJsonSchema(build());
     schemas.set(name, cached);
   }
   return cached;
+}
+
+/** Every tool's input schema is sent to the model on each session, so the
+ *  boilerplate zod adds is dropped from the JSON Schema it advertises: the
+ *  `$schema` URI (2020-12 is MCP's default anyway) and the +/-2^53 bounds an
+ *  unbounded `.int()` carries. Validation still runs on the zod schema. */
+function withCompactJsonSchema<T extends z.ZodObject>(zodSchema: T): T {
+  const std = zodSchema["~standard"];
+  const json = std.jsonSchema;
+  Object.defineProperty(zodSchema, "~standard", {
+    value: {
+      ...std,
+      jsonSchema: {
+        input: (options: Parameters<typeof json.input>[0]) =>
+          compactJsonSchema(json.input(options)),
+        output: json.output,
+      },
+    },
+    configurable: true,
+  });
+  return zodSchema;
+}
+
+function compactJsonSchema<T>(node: T): T {
+  if (Array.isArray(node)) return node.map(compactJsonSchema) as T;
+  if (node === null || typeof node !== "object") return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "$schema") continue;
+    if (key === "minimum" && value === Number.MIN_SAFE_INTEGER) continue;
+    if (key === "maximum" && value === Number.MAX_SAFE_INTEGER) continue;
+    out[key] = compactJsonSchema(value);
+  }
+  return out as T;
 }
 
 /** Annotations for the tools that only read. `openWorldHint` is true for
@@ -198,11 +233,10 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Get athlete",
       description:
-        "Get the athlete profile: identity, physiology and account info. Returns a " +
-        'compact subset by default - pass fields ["sportSettings"] for per-sport ' +
-        'FTP, thresholds and zones (~10 KB), or ["*"] for everything including ' +
-        "per-vendor sync configuration. Credential fields are always withheld, " +
-        "and email and date of birth are available only on explicit request.",
+        "The athlete's identity, physiology and account info. fields " +
+        '["sportSettings"] adds per-sport FTP, thresholds and zones (~10 KB). ' +
+        "Includes the public profile (name, bio, location). Credentials are " +
+        "always withheld; email and date of birth only when named in fields.",
       inputSchema: schema("get_athlete", () =>
         z.object({
           fields: fieldsParam(ATHLETE_SUMMARY_FIELDS, 162),
@@ -217,30 +251,15 @@ export function createServer(config: ServerConfig): McpServer {
   );
 
   server.registerTool(
-    "get_athlete_profile",
-    {
-      title: "Get athlete public profile",
-      description:
-        "Get public profile info for the athlete (name, bio, location, etc.).",
-      inputSchema: schema("get_athlete_profile", () => z.object({})),
-      annotations: READ_ONLY,
-    },
-    async () =>
-      json(await client.get(`/athlete/${client.athleteId}/profile`))
-  );
-
-  server.registerTool(
     "update_sport_settings",
     {
       title: "Update sport settings",
       description:
-        "Change the thresholds and zones for one sport: FTP, threshold HR, max HR, " +
-        "threshold pace, W', and the zone boundaries. Only supply what should " +
+        "Change one sport's thresholds and zones. Only supply what should " +
         "change. Settings are shared by a group of sport types (Ride covers " +
-        "VirtualRide and GravelRide, Run covers TrailRun), so naming any type in " +
-        "the group updates them all. This changes how future activities are " +
-        "scored; activities already recorded keep the zones and load they were " +
-        "given. Returns the changed fields before and after.",
+        "VirtualRide and GravelRide), so any type in the group updates them " +
+        "all. Affects how future activities are scored, not past ones. " +
+        "Returns the changed fields before and after.",
       inputSchema: schema("update_sport_settings", () =>
         z.object({
           sport: z
@@ -264,43 +283,39 @@ export function createServer(config: ServerConfig): McpServer {
             .int()
             .positive()
             .optional()
-            .describe("Threshold (lactate threshold) heart rate in bpm"),
+            .describe("Threshold HR in bpm"),
           max_hr: z.number().int().positive().optional().describe("Max HR in bpm"),
           threshold_pace: z
             .string()
             .regex(PACE_RE)
             .optional()
             .describe(
-              'Threshold pace as minutes:seconds per unit: "3:56/km", "6:20/mi" ' +
-                'or "1:45/100m". Converted to the m/s the API stores.'
+              'Threshold pace, e.g. "3:56/km", "6:20/mi" or "1:45/100m"'
             ),
           power_zones: z
             .array(z.number())
             .optional()
             .describe(
-              "Upper bound of each power zone as % of FTP, ascending, last 999 " +
-                "e.g. [55, 75, 90, 105, 120, 150, 999]"
+              "Zone upper bounds as % of FTP, ascending, last 999"
             ),
           hr_zones: z
             .array(z.number())
             .optional()
             .describe(
-              "Upper bound of each HR zone in bpm, ascending, last equal to max HR"
+              "Zone upper bounds in bpm, ascending, last = max HR"
             ),
           pace_zones: z
             .array(z.number())
             .optional()
             .describe(
-              "Upper bound of each pace zone as % of threshold pace, ascending, " +
-                "last 999"
+              "Zone upper bounds as % of threshold pace, ascending, last 999"
             ),
           recalc_hr_zones: z
             .boolean()
             .optional()
             .describe(
-              "Recalculate HR zones from the new threshold or max HR. Defaults to " +
-                "true when lthr or max_hr changes and hr_zones is not given, " +
-                "otherwise false."
+              "Recalculate HR zones from the new lthr/max_hr. Default: true when " +
+              "either changes without hr_zones"
             ),
         })
       ),
@@ -362,12 +377,11 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "List activities",
       description:
-        "List activities for a date range. Returns a compact summary of each activity " +
-        "by default; use `fields` to choose exactly what you need.",
+        "List activities in a date range.",
       inputSchema: schema("list_activities", () =>
         z.object({
-          oldest: isoDate("Start date in YYYY-MM-DD format (inclusive)"),
-          newest: isoDate("End date in YYYY-MM-DD format (inclusive)"),
+          oldest: isoDate("Start date YYYY-MM-DD"),
+          newest: isoDate("End date YYYY-MM-DD"),
           limit: z
             .number()
             .int()
@@ -396,8 +410,7 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Get activity",
       description:
-        "Get detailed information about a specific activity by its ID. Returns a " +
-        "compact summary by default; pass `fields` for other metrics.",
+        "Get one activity by ID.",
       inputSchema: schema("get_activity", () =>
         z.object({
           activity_id: activityId(),
@@ -445,9 +458,8 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Get activity intervals",
       description:
-        "Get the lap/interval breakdown for an activity. Each lap carries 84 fields, " +
-        "so a compact subset is returned by default; `fields` applies to the " +
-        "individual laps inside `icu_intervals` and `icu_groups`.",
+        "An activity's laps/intervals. `fields` applies to each lap in " +
+        "`icu_intervals` and `icu_groups`.",
       inputSchema: schema("get_activity_intervals", () =>
         z.object({
           activity_id: activityId(),
@@ -474,13 +486,10 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Search intervals",
       description:
-        "Find activities across the athlete's whole history that contain intervals " +
-        "of a given length and intensity, e.g. every 15-25 minute effort at 90-105% " +
-        "of threshold. Intensity is a percentage of the threshold for the interval's " +
-        "target (FTP for power, threshold HR, threshold pace). Returns matching " +
-        "activities, newest first, each with an `interval_summary` such as " +
-        "\"2x 8m 162w\"; use get_activity_intervals on one for the per-lap detail. " +
-        "There is no date filter - narrow with limit, or compare start_date_local.",
+        "Find activities, newest first across all history, with intervals of " +
+        "a given length and intensity, e.g. 15-25 min at 90-105% of threshold " +
+        "(FTP, threshold HR or pace, by the interval's target). Each has an " +
+        "`interval_summary` like \"2x 8m 162w\". No date filter.",
       inputSchema: schema("search_intervals", () =>
         z.object({
           min_secs: z
@@ -558,11 +567,9 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Get activity streams",
       description:
-        "Get time-series data streams for an activity (power, HR, cadence, speed, altitude, GPS, etc.). " +
-        "Streams are large, so each channel is downsampled to " +
-        `${DEFAULT_STREAM_POINTS} evenly spaced points by default. ` +
-        "Pass types to fetch only the channels you need, and raise max_points only when you " +
-        "genuinely need finer resolution.",
+        "An activity's time series (power, HR, cadence, speed, altitude, GPS...), " +
+        `each channel downsampled to ${DEFAULT_STREAM_POINTS} points by default. ` +
+        "Ask only for the types you need.",
       inputSchema: schema("get_activity_streams", () =>
         z.object({
           activity_id: activityId(),
@@ -614,17 +621,16 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Get activity best efforts",
       description:
-        "Find best efforts within an activity - e.g. peak 5-min power, fastest 1km. " +
-        "Requires a stream to measure and exactly one of duration or distance.",
+        "Best efforts within an activity, e.g. peak 5-min power, fastest 1 " +
+        "km. Give exactly one of duration or distance.",
       inputSchema: schema("get_activity_best_efforts", () =>
         z.object({
           activity_id: activityId(),
           stream: z
             .string()
             .describe(
-              "Stream to measure, which must exist on the activity - see its " +
-                '`stream_types`. e.g. watts, heartrate, velocity_smooth, distance. ' +
-                'Note "pace" is NOT valid; use velocity_smooth.'
+              "Stream on the activity (see its `stream_types`), e.g. watts, " +
+              "heartrate, velocity_smooth. For pace use velocity_smooth."
             ),
           duration: z
             .number()
@@ -679,13 +685,9 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Get activity histogram",
       description:
-        "Get time-in-range for one activity as a histogram: how many seconds were " +
-        "spent in each power, heart rate, pace or grade adjusted pace band. A far " +
-        "cheaper read than a stream when the question is about distribution " +
-        "(\"how long was I above 300 W\"). Each bucket is {min, max, secs}; power " +
-        "is in watts, HR in bpm, and pace and gap bounds are passed through as the " +
-        "API returns them (speed in m/s). Empty buckets are left out, and an " +
-        "activity without that data returns no buckets.",
+        "Time in each power, HR, pace or GAP band for one activity, as {min, " +
+        "max, secs} buckets. Much cheaper than streams for \"how long above " +
+        "300 W\". Watts, bpm, and m/s for pace and gap; empty buckets omitted.",
       inputSchema: schema("get_activity_histogram", () =>
         z.object({
           activity_id: activityId(),
@@ -711,8 +713,7 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Get activity comments",
       description:
-        "Read the comments and notes on an activity - a coach's feedback, the " +
-        "athlete's own notes - oldest first as the API returns them.",
+        "Comments on an activity (coach feedback, own notes), oldest first.",
       inputSchema: schema("get_activity_messages", () =>
         z.object({
           activity_id: activityId(),
@@ -735,10 +736,9 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Comment on activity",
       description:
-        "Post a comment on an activity. It is posted as the athlete and is seen " +
-        "by everyone who can see the activity, a coach included, and there is no " +
-        "tool to take it back - show the user the exact text and get their go " +
-        "ahead before posting.",
+        "Post a comment on an activity, as the athlete. Anyone who can see " +
+        "the activity, a coach included, sees it, and it cannot be deleted " +
+        "here: show the user the exact text and get their go-ahead first.",
       inputSchema: schema("add_activity_message", () =>
         z.object({
           activity_id: activityId(),
@@ -752,12 +752,15 @@ export function createServer(config: ServerConfig): McpServer {
       ),
       annotations: CREATE,
     },
-    async ({ activity_id, content }) =>
-      json(
-        await client.post(`/activity/${segment(activity_id)}/messages`, {
-          content,
-        })
-      )
+    async ({ activity_id, content }) => {
+      // The API answers with the whole chat record; the new message's ID is
+      // the part worth keeping.
+      const posted = await client.post<{ id?: number }>(
+        `/activity/${segment(activity_id)}/messages`,
+        { content }
+      );
+      return json({ id: posted?.id, activity_id, content });
+    }
   );
 
   server.registerTool(
@@ -765,10 +768,8 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Update activity",
       description:
-        "Change the editable fields on a completed activity: its name, description, " +
-        "sport type, tags and the subjective scores. Only supply what should change - " +
-        "omitted fields are left alone. Recorded data (power, HR, GPS) is not " +
-        "editable here.",
+        "Edit a completed activity's name, notes, type, flags, tags or " +
+        "subjective scores. Only supply what should change.",
       inputSchema: schema("update_activity", () =>
         z.object({
           activity_id: activityId(),
@@ -778,8 +779,7 @@ export function createServer(config: ServerConfig): McpServer {
             .string()
             .optional()
             .describe(
-              "Sport type, which the API validates strictly e.g. Ride, VirtualRide, " +
-                "GravelRide, Run, TrailRun, Swim, WeightTraining"
+              "Sport type, e.g. Ride, VirtualRide, Run, Swim"
             ),
           sub_type: z
             .enum(["NONE", "COMMUTE", "WARMUP", "COOLDOWN", "RACE"])
@@ -791,7 +791,7 @@ export function createServer(config: ServerConfig): McpServer {
           tags: z
             .array(z.string())
             .optional()
-            .describe("Replaces the full tag list - include tags to keep"),
+            .describe("Replaces the whole tag list"),
           feel: z
             .number()
             .int()
@@ -819,125 +819,65 @@ export function createServer(config: ServerConfig): McpServer {
   /** Power, HR and pace curves are one endpoint family: same request shape, same
    *  wrapper back - a `list` of curves plus an `activities` lookup map roughly as
    *  large as the curves themselves. Only the path, the summary set and pace's
-   *  grade-adjustment flag differ, so all three tools register through here. */
-  function registerCurveTool({
-    name,
-    title,
-    description,
-    path,
-    summary,
-    total,
-    extra,
-  }: {
-    name: string;
-    title: string;
-    description: string;
-    path: string;
-    summary: string[];
-    /** Field count of the untrimmed record, for the `fields` description. */
-    total: number;
-    /** Query parameters only this endpoint takes, slotted in before `fields`. */
-    extra?: z.ZodRawShape;
-  }) {
-    server.registerTool(
-      name,
-      {
-        title,
-        description,
-        inputSchema: schema(name, () =>
-          z.object({
-            type: z
-              .string()
-              .describe(
-                "Sport type - REQUIRED, and exactly one (the API rejects a comma-separated " +
-                  "list). e.g. Ride, VirtualRide, GravelRide, Run, VirtualRun, Swim"
-              ),
-            oldest: isoDate("Start date YYYY-MM-DD").optional(),
-            newest: isoDate("End date YYYY-MM-DD").optional(),
-            curves: z
-              .string()
-              .optional()
-              .describe(
-                'Which curves to return, e.g. "42d" or "all". Invalid values are ' +
-                  "rejected by the API with the list of valid ones."
-              ),
-            ...extra,
-            fields: fieldsParam(summary, total),
-          })
-        ),
-        annotations: READ_ONLY,
-      },
-      async ({ fields, ...rest }) => {
-        // Everything that is not `fields` is a query parameter; a boolean goes
-        // over the wire as "true"/"false".
-        const params: Record<string, string> = Object.fromEntries(
-          Object.entries(compactBody(rest)).map(([k, v]) => [k, String(v)])
-        );
-        const data = await client.get(
-          `/athlete/${client.athleteId}${path}`,
-          params
-        );
-        if (fields?.includes("*")) return json(data);
+   *  grade-adjustment flag differ, so one tool serves all three. */
+  const CURVES = {
+    power: { path: "/power-curves", summary: POWER_CURVE_SUMMARY_FIELDS },
+    hr: { path: "/hr-curves", summary: HR_CURVE_SUMMARY_FIELDS },
+    pace: { path: "/pace-curves", summary: PACE_CURVE_SUMMARY_FIELDS },
+  } as const;
 
-        const trimmed = projectNestedFields(data, ["list"], fields, summary);
-        // `activities` is a lookup map roughly as large as the curves themselves.
-        if (trimmed && typeof trimmed === "object" && !Array.isArray(trimmed)) {
-          const { activities, ...kept } = trimmed as Record<string, unknown>;
-          return json(kept);
-        }
-        return json(trimmed);
-      }
-    );
-  }
-
-  registerCurveTool({
-    name: "get_power_curves",
-    title: "Get power curves",
-    description:
-      "Get the athlete's best mean maximal power curves across activities of one " +
-      "sport. `secs` and `values` on each curve are the curve itself. The bulk " +
-      "`activities` lookup map is omitted unless you pass fields [\"*\"].",
-    path: "/power-curves",
-    summary: POWER_CURVE_SUMMARY_FIELDS,
-    total: 20,
-  });
-
-  registerCurveTool({
-    name: "get_hr_curves",
-    title: "Get HR curves",
-    description:
-      "Get the athlete's best mean maximal heart rate curves across activities of " +
-      "one sport - the highest average HR held for each duration. `secs` and " +
-      "`values` on each curve are the curve itself. The bulk `activities` lookup " +
-      "map is omitted unless you pass fields [\"*\"].",
-    path: "/hr-curves",
-    summary: HR_CURVE_SUMMARY_FIELDS,
-    total: 18,
-  });
-
-  registerCurveTool({
-    name: "get_pace_curves",
-    title: "Get pace curves",
-    description:
-      "Get the athlete's best pace curves across activities of one sport. Unlike " +
-      "the power and HR curves these are indexed by distance, not duration: " +
-      "`distance` (metres) against `values` (seconds taken) is the curve itself. " +
-      "Pass gap: true for grade adjusted pace. The bulk `activities` lookup map " +
-      "is omitted unless you pass fields [\"*\"].",
-    path: "/pace-curves",
-    summary: PACE_CURVE_SUMMARY_FIELDS,
-    total: 20,
-    extra: {
-      gap: z
-        .boolean()
-        .optional()
-        .describe(
-          "Return grade adjusted pace (GAP) curves, which correct for climbing " +
-            'and descending. Each curve\'s `type` reports which it is - "PACE" ' +
-            'or "GAP" - so the answer says so rather than having to be trusted.'
-        ),
+  server.registerTool(
+    "get_curves",
+    {
+      title: "Get best-effort curves",
+      description:
+        "Best efforts across one sport's activities. power: best watts held " +
+        "for each duration; hr: highest average HR for each duration (both " +
+        "`secs` against `values`). pace: best times by distance, `distance` " +
+        "(m) against `values` (s).",
+      inputSchema: schema("get_curves", () =>
+        z.object({
+          metric: z.enum(["power", "hr", "pace"]).describe("Which curve"),
+          type: z.string().describe("Exactly one sport type, e.g. Ride, Run, Swim"),
+          oldest: isoDate("Start date YYYY-MM-DD").optional(),
+          newest: isoDate("End date YYYY-MM-DD").optional(),
+          curves: z.string().optional().describe('Which curves, e.g. "42d" or "all"'),
+          gap: z
+            .boolean()
+            .optional()
+            .describe(
+              "pace only: grade adjusted pace; each curve's `type` says PACE or GAP"
+            ),
+          fields: z
+            .array(z.string())
+            .optional()
+            .describe('Fields per curve (default: a summary; ["*"] for all)'),
+        })
+      ),
+      annotations: READ_ONLY,
     },
-  });
+    async ({ metric, fields, ...rest }) => {
+      if (rest.gap !== undefined && metric !== "pace") {
+        throw new Error("gap applies only to metric pace.");
+      }
+      const { path, summary } = CURVES[metric];
+      // Everything else is a query parameter; a boolean goes over the wire as
+      // "true"/"false".
+      const params: Record<string, string> = Object.fromEntries(
+        Object.entries(compactBody(rest)).map(([k, v]) => [k, String(v)])
+      );
+      const data = await client.get(`/athlete/${client.athleteId}${path}`, params);
+      if (fields?.includes("*")) return json(data);
+
+      const trimmed = projectNestedFields(data, ["list"], fields, summary);
+      // `activities` is a lookup map roughly as large as the curves themselves.
+      if (trimmed && typeof trimmed === "object" && !Array.isArray(trimmed)) {
+        const { activities, ...kept } = trimmed as Record<string, unknown>;
+        return json(kept);
+      }
+      return json(trimmed);
+    }
+  );
 
   // ── Wellness ───────────────────────────────────────────────────────────────
 
@@ -946,18 +886,18 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "List wellness records",
       description:
-        "List wellness records for a date range: fitness model (CTL/ATL), HRV, " +
-        "resting HR, sleep, weight, mood and the other subjective scores.",
+        "Wellness records in a date range: CTL/ATL, HRV, resting HR, sleep, " +
+        "weight, subjective scores. For one day, give only oldest.",
       inputSchema: schema("list_wellness", () =>
         z.object({
           oldest: isoDate("Start date YYYY-MM-DD"),
-          newest: isoDate("End date YYYY-MM-DD"),
+          newest: isoDate("End date YYYY-MM-DD (default: oldest)").optional(),
           fields: fieldsParam(WELLNESS_SUMMARY_FIELDS, 47),
         })
       ),
       annotations: READ_ONLY,
     },
-    async ({ oldest, newest, fields }) => {
+    async ({ oldest, newest = oldest, fields }) => {
       const data = await client.get(`/athlete/${client.athleteId}/wellness`, {
         oldest,
         newest,
@@ -967,27 +907,12 @@ export function createServer(config: ServerConfig): McpServer {
   );
 
   server.registerTool(
-    "get_wellness",
-    {
-      title: "Get wellness record",
-      description: "Get the wellness record for a specific date.",
-      inputSchema: schema("get_wellness", () =>
-        z.object({
-          date: isoDate("Date in YYYY-MM-DD format"),
-        })
-      ),
-      annotations: READ_ONLY,
-    },
-    async ({ date }) =>
-      json(await client.get(`/athlete/${client.athleteId}/wellness/${date}`))
-  );
-
-  server.registerTool(
     "update_wellness",
     {
       title: "Update wellness record",
       description:
-        "Update the wellness record for a specific date. Only supply the fields you want to change.",
+        "Update the wellness record for a date. Only supply what should " +
+        "change.",
       inputSchema: schema("update_wellness", () =>
         z.object({
           date: isoDate("Date in YYYY-MM-DD format"),
@@ -1035,19 +960,16 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Get fitness chart (CTL/ATL/form)",
       description:
-        "The performance management chart as a daily series: CTL (fitness), ATL " +
-        "(fatigue) and form, which is CTL - ATL and is also called TSB. Use it for " +
-        "fitness trend, freshness and taper questions. Days with no fitness data " +
-        "are omitted rather than zero-filled. A `newest` in the future returns the " +
-        "projection from planned calendar workouts, with each such point flagged " +
-        "`projected: true` - those are a plan, not a measurement, and appear only " +
-        "if the athlete has 'include planned workouts in fitness' enabled on " +
-        "Intervals.icu.",
+        "Daily CTL (fitness), ATL (fatigue) and form (CTL - ATL, aka TSB), " +
+        "for trend, freshness and taper questions. Days without data are " +
+        "omitted. A future `newest` adds projections from planned workouts, " +
+        "flagged `projected: true` (only if the athlete enabled planned " +
+        "workouts in fitness).",
       inputSchema: schema("get_fitness_chart", () =>
         z.object({
           oldest: isoDate("Start date YYYY-MM-DD (inclusive)"),
           newest: isoDate(
-            "End date YYYY-MM-DD (inclusive). A future date returns projections."
+            "End date YYYY-MM-DD; a future date adds projections"
           ),
         })
       ),
@@ -1074,9 +996,8 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "List calendar events",
       description:
-        "List events on the athlete's training calendar for a date range. Returns a " +
-        "compact summary of each event by default, omitting the structured-workout " +
-        "document; pass `fields` to change that.",
+        "List calendar events in a date range (without the structured " +
+        "workout_doc unless asked for in fields).",
       inputSchema: schema("list_events", () =>
         z.object({
           oldest: isoDate("Start date YYYY-MM-DD"),
@@ -1100,8 +1021,8 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Get calendar event",
       description:
-        "Get a specific calendar event by ID. Returns a compact summary by default - " +
-        'pass fields ["*"] (or name workout_doc) to get the structured workout.',
+        "Get one calendar event by ID. Name workout_doc in fields for the " +
+        "structured workout.",
       inputSchema: schema("get_event", () =>
         z.object({
           event_id: numericId("The event ID"),
@@ -1125,11 +1046,10 @@ export function createServer(config: ServerConfig): McpServer {
       ? { ...e, start_date_local: `${e.start_date_local}T00:00:00` }
       : e;
 
-  /** The fields of one new calendar event, shared by create_event and the
-   *  per-event entries of create_events. */
+  /** The fields of one new calendar event: an entry of create_events. */
   const newEventShape = () => ({
     start_date_local: isoDateTime(
-      "Start date/time in ISO 8601 format e.g. 2024-06-01T08:00:00"
+      "Start, e.g. 2024-06-01 or 2024-06-01T08:00:00"
     ),
     category: z.enum(EVENT_CATEGORIES).describe("Event category"),
     name: z.string().optional().describe("Event name/title"),
@@ -1137,27 +1057,24 @@ export function createServer(config: ServerConfig): McpServer {
       .string()
       .optional()
       .describe(
-        "Event notes, or workout syntax for a structured WORKOUT - see the " +
-          "intervals-icu://workout-syntax resource"
+        "Notes, or workout syntax for a WORKOUT (see " +
+        "intervals-icu://workout-syntax)"
       ),
     type: z
       .string()
       .optional()
       .describe(
-        "Sport type, validated strictly by the API e.g. Ride, VirtualRide, " +
-          "Run, Swim, WeightTraining. Required for the RACE categories and " +
-          "for SET_EFTP, which sets the eFTP of one sport."
+        "Sport type, e.g. Ride, Run, Swim. Required for RACE_* and SET_EFTP"
       ),
     end_date_local: isoDateTime(
-      "End date/time for a ranged event - PLAN, HOLIDAY, SICK, INJURED"
+      "End, for PLAN, HOLIDAY, SICK, INJURED"
     ).optional(),
     moving_time: z
       .number()
       .positive()
       .optional()
       .describe(
-        "Planned duration in seconds. Omit for a workout whose steps already " +
-          "set the duration."
+        "Planned duration in seconds, if the steps don't set it"
       ),
     distance: z
       .number()
@@ -1168,51 +1085,28 @@ export function createServer(config: ServerConfig): McpServer {
     target: z
       .enum(["AUTO", "POWER", "HR", "PACE"])
       .optional()
-      .describe("Which metric the workout's targets are expressed against"),
+      .describe("Metric the targets use"),
   });
-
-  server.registerTool(
-    "create_event",
-    {
-      title: "Create calendar event",
-      description:
-        "Create an event on the athlete's training calendar: a planned workout, a " +
-        "race, a note, time off. For a structured workout, pass category WORKOUT " +
-        "and put Intervals.icu workout syntax in `description` - Intervals.icu " +
-        "parses it into steps with training load and zone targets. The syntax is " +
-        "the `intervals-icu://workout-syntax` resource; a description it cannot " +
-        "parse is silently kept as plain text with no load. " +
-        EVENT_CATEGORY_HELP,
-      inputSchema: schema("create_event", () => z.object(newEventShape())),
-      annotations: CREATE,
-    },
-    async (fields) =>
-      json(
-        await client.post(
-          `/athlete/${client.athleteId}/events`,
-          compactBody(withStartTime(fields))
-        )
-      )
-  );
 
   server.registerTool(
     "create_events",
     {
       title: "Create calendar events",
       description:
-        "Create several calendar events in one call - a week of sessions, a race " +
-        "with its taper. Each entry takes the same fields as create_event. For a " +
-        "block worth reusing, a plan (create_folder type PLAN, then apply_plan) " +
-        "is the better tool. Returns the created events. Not all-or-nothing: if " +
-        "the API rejects an entry, the ones before it may already exist, so " +
-        "list_events the range before retrying.",
+        "Create calendar events - one, or a week of sessions in one call: " +
+        "planned workouts, races, notes, time off. For a structured WORKOUT " +
+        "put workout syntax (intervals-icu://workout-syntax) in `description`; " +
+        "text it cannot parse is kept as plain notes with no load. Not " +
+        "all-or-nothing: after an error, entries before the bad one may exist, " +
+        "so list_events before retrying. " +
+        EVENT_CATEGORY_HELP,
       inputSchema: schema("create_events", () =>
         z.object({
           events: z
             .array(z.object(newEventShape()))
             .min(1)
             .max(100)
-            .describe("The events to create, each shaped like a create_event call"),
+            .describe("The events to create"),
         })
       ),
       annotations: CREATE,
@@ -1231,16 +1125,12 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Update calendar event",
       description:
-        "Change an existing calendar event. Only supply what should change - " +
-        "omitted fields are left alone. Rewriting `description` on a WORKOUT " +
-        "replaces its steps, so send the whole workout, not a fragment. " +
-        "`category` is one-way for some kinds: once an event is TARGET or PLAN " +
-        "the API refuses to change it again (422), so delete and recreate " +
-        "instead. " +
+        "Change a calendar event. Only supply what should change; a new WORKOUT " +
+        "`description` replaces all its steps. TARGET and PLAN events cannot change " +
+        "category again: delete and recreate instead." +
         (DELETE_MODE === "safe"
-          ? "In delete mode `safe`, a past event cannot be moved to today or later. "
-          : "") +
-        EVENT_CATEGORY_HELP,
+          ? " A past event cannot be moved to today or later (delete mode `safe`)."
+          : ""),
       inputSchema: schema("update_event", () =>
         z.object({
           event_id: z.number().int().describe("The event ID"),
@@ -1249,8 +1139,8 @@ export function createServer(config: ServerConfig): McpServer {
             .string()
             .optional()
             .describe(
-              "Event notes, or workout syntax for a structured WORKOUT - see the " +
-                "intervals-icu://workout-syntax resource"
+              "Notes, or workout syntax for a WORKOUT (see " +
+              "intervals-icu://workout-syntax)"
             ),
           category: z.enum(EVENT_CATEGORIES).optional().describe("Event category"),
           type: z.string().optional().describe("Sport type e.g. Ride, Run, Swim"),
@@ -1270,7 +1160,7 @@ export function createServer(config: ServerConfig): McpServer {
           target: z
             .enum(["AUTO", "POWER", "HR", "PACE"])
             .optional()
-            .describe("Which metric the workout's targets are expressed against"),
+            .describe("Metric the targets use"),
         })
       ),
       annotations: UPDATE,
@@ -1304,9 +1194,8 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Duplicate calendar events",
       description:
-        "Copy one or more calendar events forward by whole weeks, e.g. repeat this " +
-        "week's three key sessions for the next four weeks. Each copy keeps the " +
-        "original's weekday and time. Returns the new events.",
+        "Copy calendar events forward by whole weeks, keeping weekday and " +
+        "time, e.g. repeat this week's key sessions for four weeks.",
       inputSchema: schema("duplicate_events", () =>
         z.object({
           event_ids: z
@@ -1345,12 +1234,9 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Apply training plan",
       description:
-        "Put every workout in a training plan onto the calendar, starting from a " +
-        "date: a workout's `day` is its offset from start_date, so day 0 lands on " +
-        "start_date and day 3 three days later. " +
-        "Find plans with list_folders (type PLAN), or build one with create_folder " +
-        "and create_workout using `day`. This can add dozens of events at once, so " +
-        "confirm the plan and start date with the user first.",
+        "Put every workout in a plan (a PLAN folder) onto the calendar: day 0 " +
+        "lands on start_date, day 3 three days later. Can add dozens of " +
+        "events, so confirm the plan and date with the user first.",
       inputSchema: schema("apply_plan", () =>
         z.object({
           folder_id: z.number().int().describe("ID of the plan (a PLAN folder)"),
@@ -1374,14 +1260,10 @@ export function createServer(config: ServerConfig): McpServer {
       {
         title: "Delete calendar event",
         description:
-          "Delete one event from the training calendar, by ID. Deletes only the " +
-          "event given: other events created in the same batch are left alone." +
+          "Delete one calendar event by ID." +
           (DELETE_MODE === "safe"
-            ? " This server runs in delete mode `safe`, so an event dated before " +
-              "today is refused - planning mistakes are removable, training " +
-              "history is not."
-            : " This server runs in delete mode `full`, so past events can be " +
-              "deleted too."),
+            ? " Events dated before today are refused (delete mode `safe`)."
+            : " Past events can be deleted too (delete mode `full`)."),
         inputSchema: schema("delete_event", () =>
           z.object({
             event_id: z.number().int().describe("The event ID"),
@@ -1418,26 +1300,46 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "List workouts",
       description: "List all workouts in the athlete's workout library.",
-      inputSchema: schema("list_workouts", () => z.object({})),
+      inputSchema: schema("list_workouts", () =>
+        z.object({ fields: fieldsParam(WORKOUT_SUMMARY_FIELDS, 28) })
+      ),
       annotations: READ_ONLY,
     },
-    async () => json(await client.get(`/athlete/${client.athleteId}/workouts`))
+    async ({ fields }) =>
+      json(
+        projectFields(
+          await client.get(`/athlete/${client.athleteId}/workouts`),
+          fields,
+          WORKOUT_SUMMARY_FIELDS
+        )
+      )
   );
 
   server.registerTool(
     "get_workout",
     {
       title: "Get workout",
-      description: "Get a specific workout from the library by ID.",
+      description:
+        "Get one library workout by ID. Name workout_doc in fields for the " +
+        "parsed steps.",
       inputSchema: schema("get_workout", () =>
         z.object({
           workout_id: numericId("The workout ID"),
+          fields: fieldsParam(WORKOUT_SUMMARY_FIELDS, 28),
         })
       ),
       annotations: READ_ONLY,
     },
-    async ({ workout_id }) =>
-      json(await client.get(`/athlete/${client.athleteId}/workouts/${segment(workout_id)}`))
+    async ({ workout_id, fields }) =>
+      json(
+        projectFields(
+          await client.get(
+            `/athlete/${client.athleteId}/workouts/${segment(workout_id)}`
+          ),
+          fields,
+          WORKOUT_SUMMARY_FIELDS
+        )
+      )
   );
 
   server.registerTool(
@@ -1445,52 +1347,48 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Create library workout",
       description:
-        "Save a reusable workout into a folder or training plan in the athlete's " +
-        "library. Put Intervals.icu workout syntax in `description` to give it " +
-        "steps - see the `intervals-icu://workout-syntax` resource. Needs a " +
-        "folder: call list_folders, or create_folder first.",
+        "Save a reusable workout into a library folder or plan. Steps go in " +
+        "`description` as workout syntax (see " +
+        "intervals-icu://workout-syntax).",
       inputSchema: schema("create_workout", () =>
         z.object({
           folder_id: z
             .number()
             .int()
-            .describe("ID of the folder or plan to save into - see list_folders"),
+            .describe("Folder or plan ID, from list_folders"),
           name: z.string().describe("Workout name"),
           description: z
             .string()
             .optional()
             .describe(
-              "Workout syntax defining the steps - see the " +
-                "intervals-icu://workout-syntax resource"
+              "Workout syntax for the steps"
             ),
           type: z
             .string()
             .optional()
             .describe(
-              "Sport type, validated strictly by the API e.g. Ride, VirtualRide, " +
-                "Run, Swim, WeightTraining"
+              "Sport type, e.g. Ride, Run, Swim"
             ),
           moving_time: z
             .number()
             .positive()
             .optional()
             .describe(
-              "Duration in seconds. Omit when the steps already set the duration."
+              "Duration in seconds, if the steps don't set it"
             ),
           distance: z.number().positive().optional().describe("Distance in meters"),
           indoor: z.boolean().optional().describe("An indoor session"),
           target: z
             .enum(["AUTO", "POWER", "HR", "PACE"])
             .optional()
-            .describe("Which metric the targets are expressed against"),
+            .describe("Metric the targets use"),
           day: z
             .number()
             .int()
             .min(0)
             .optional()
             .describe(
-              "Day within a training plan, counted from 0: day 0 lands on " +
-                "apply_plan's start_date, day 7 a week later (plans only)"
+              "Plan day from 0 (day 0 = apply_plan's start_date)"
             ),
         })
       ),
@@ -1498,9 +1396,13 @@ export function createServer(config: ServerConfig): McpServer {
     },
     async (fields) =>
       json(
-        await client.post(
-          `/athlete/${client.athleteId}/workouts`,
-          compactBody(fields)
+        project(
+          await client.post(
+            `/athlete/${client.athleteId}/workouts`,
+            compactBody(fields)
+          ),
+          WORKOUT_SUMMARY_FIELDS,
+          false
         )
       )
   );
@@ -1510,9 +1412,8 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Update library workout",
       description:
-        "Change a workout in the library. Only supply what should change. " +
-        "Rewriting `description` replaces the workout's steps, so send the whole " +
-        "workout rather than a fragment.",
+        "Change a library workout. Only supply what should change; a new " +
+        "`description` replaces all the steps.",
       inputSchema: schema("update_workout", () =>
         z.object({
           workout_id: numericId("The workout ID"),
@@ -1521,8 +1422,7 @@ export function createServer(config: ServerConfig): McpServer {
             .string()
             .optional()
             .describe(
-              "Workout syntax defining the steps - see the " +
-                "intervals-icu://workout-syntax resource"
+              "Workout syntax for the steps"
             ),
           type: z.string().optional().describe("Sport type e.g. Ride, Run, Swim"),
           folder_id: z
@@ -1540,15 +1440,14 @@ export function createServer(config: ServerConfig): McpServer {
           target: z
             .enum(["AUTO", "POWER", "HR", "PACE"])
             .optional()
-            .describe("Which metric the targets are expressed against"),
+            .describe("Metric the targets use"),
           day: z
             .number()
             .int()
             .min(0)
             .optional()
             .describe(
-              "Day within a training plan, counted from 0: day 0 lands on " +
-                "apply_plan's start_date, day 7 a week later (plans only)"
+              "Plan day from 0 (day 0 = apply_plan's start_date)"
             ),
         })
       ),
@@ -1556,9 +1455,13 @@ export function createServer(config: ServerConfig): McpServer {
     },
     async ({ workout_id, ...fields }) =>
       json(
-        await client.put(
-          `/athlete/${client.athleteId}/workouts/${segment(workout_id)}`,
-          compactBody(fields)
+        project(
+          await client.put(
+            `/athlete/${client.athleteId}/workouts/${segment(workout_id)}`,
+            compactBody(fields)
+          ),
+          WORKOUT_SUMMARY_FIELDS,
+          false
         )
       )
   );
@@ -1569,10 +1472,8 @@ export function createServer(config: ServerConfig): McpServer {
       {
         title: "Delete library workout",
         description:
-          "Delete a workout from the athlete's library by ID. This removes the " +
-          "template only - calendar events already created from it are not " +
-          "touched. A workout template carries no training history, so this is " +
-          "allowed in both `safe` and `full` delete modes.",
+          "Delete a library workout by ID. Calendar events made from it are " +
+          "kept.",
         inputSchema: schema("delete_workout", () =>
           z.object({
             workout_id: numericId("The workout ID"),
@@ -1594,9 +1495,7 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "List workout folders and plans",
       description:
-        "List the folders and training plans in the athlete's workout library. " +
-        "`type` distinguishes a plain FOLDER from a PLAN. Use this to find the " +
-        "folder_id that create_workout needs.",
+        "List library folders and training plans (`type` FOLDER or PLAN).",
       inputSchema: schema("list_folders", () =>
         z.object({
           fields: fieldsParam(FOLDER_SUMMARY_FIELDS, 24),
@@ -1615,9 +1514,8 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Create workout folder or plan",
       description:
-        "Create a folder for library workouts, or a training plan - a PLAN is a " +
-        "folder whose workouts are laid out by day and can be applied to the " +
-        "calendar as a block.",
+        "Create a library folder, or a PLAN: a folder whose workouts are laid " +
+        "out by day and applied to the calendar with apply_plan.",
       inputSchema: schema("create_folder", () =>
         z.object({
           name: z.string().describe("Folder or plan name"),
@@ -1657,8 +1555,7 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Create gear",
       description:
-        "Add a bike, pair of shoes or component to the athlete's gear, so " +
-        "activities can be assigned to it and its distance tracked.",
+        "Add a bike, shoes or a component to the athlete's gear.",
       inputSchema: schema("create_gear", () =>
         z.object({
           name: z.string().min(1).describe("Gear name, e.g. Tarmac SL7"),
@@ -1678,8 +1575,8 @@ export function createServer(config: ServerConfig): McpServer {
     {
       title: "Update gear",
       description:
-        "Rename gear, change its type, or retire it (retired: true, dated today) " +
-        "and bring it back (retired: false). Only supply what should change.",
+        "Rename gear, change its type, or retire / un-retire it. Only supply " +
+        "what should change.",
       inputSchema: schema("update_gear", () =>
         z.object({
           gear_id: gearId(),
@@ -1726,54 +1623,27 @@ export function createServer(config: ServerConfig): McpServer {
     });
 
   server.registerTool(
-    "add_gear_reminder",
+    "set_gear_reminder",
     {
-      title: "Add gear maintenance reminder",
+      title: "Add or change a gear reminder",
       description:
         "Add a maintenance reminder to gear, e.g. \"Replace chain\" every 3000 " +
-        "km, or \"Service fork\" every 50 hours. Intervals.icu flags it once " +
-        "the gear has done that much since the reminder was set. Returns the " +
-        "gear with its reminders.",
-      inputSchema: schema("add_gear_reminder", () =>
+        "km or \"Service fork\" every 50 hours. With reminder_id (from " +
+        "list_gear), change that reminder instead, or reset it once the " +
+        "maintenance is done; only supply what should change.",
+      inputSchema: schema("set_gear_reminder", () =>
         z.object({
           gear_id: gearId(),
-          name: z.string().min(1).describe("What to do, e.g. Replace chain"),
-          every_km: z.number().positive().optional().describe("Due every N km"),
-          every_hours: z
+          reminder_id: z
             .number()
-            .positive()
+            .int()
             .optional()
-            .describe("Due every N hours of use"),
-        })
-      ),
-      annotations: CREATE,
-    },
-    async ({ gear_id, ...fields }) => {
-      if (fields.every_km === undefined && fields.every_hours === undefined) {
-        throw new Error("Give the reminder every_km, every_hours, or both.");
-      }
-      return json(
-        await client.post(
-          `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder`,
-          reminderBody(fields)
-        )
-      );
-    }
-  );
-
-  server.registerTool(
-    "update_gear_reminder",
-    {
-      title: "Update gear maintenance reminder",
-      description:
-        "Change a gear reminder's text or how often it falls due, or mark the " +
-        "maintenance done (reset). Reminder IDs are on each gear's `reminders` " +
-        "in list_gear. Only supply what should change.",
-      inputSchema: schema("update_gear_reminder", () =>
-        z.object({
-          gear_id: gearId(),
-          reminder_id: z.number().int().describe("The reminder ID"),
-          name: z.string().min(1).optional().describe("New reminder text"),
+            .describe("The reminder to change; omit to add a new one"),
+          name: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("What to do, e.g. Replace chain (needed for a new one)"),
           every_km: z.number().positive().optional().describe("Due every N km"),
           every_hours: z
             .number()
@@ -1783,15 +1653,35 @@ export function createServer(config: ServerConfig): McpServer {
           reset: z
             .boolean()
             .optional()
-            .describe(
-              "true once the maintenance is done: restarts the count from now"
-            ),
+            .describe("Maintenance done: restart the count from now"),
         })
       ),
-      annotations: UPDATE,
+      // Adds a record without reminder_id and overwrites one with it, so it
+      // is neither idempotent nor safe from overwriting.
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
     },
-    async ({ gear_id, reminder_id, reset = false, ...fields }) => {
+    async ({ gear_id, reminder_id, reset, ...fields }) => {
       const body = reminderBody(fields);
+      const gearPath = `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder`;
+
+      if (reminder_id === undefined) {
+        if (reset !== undefined) {
+          throw new Error("reset needs the reminder_id of an existing reminder.");
+        }
+        if (fields.name === undefined) {
+          throw new Error("A new reminder needs a name.");
+        }
+        if (fields.every_km === undefined && fields.every_hours === undefined) {
+          throw new Error("Give the reminder every_km, every_hours, or both.");
+        }
+        return json(await client.post(gearPath, body));
+      }
+
       if (Object.keys(body).length === 0 && !reset) {
         throw new Error(
           "Nothing to change: supply name, every_km, every_hours or reset."
@@ -1802,8 +1692,8 @@ export function createServer(config: ServerConfig): McpServer {
       return json(
         await client.request(
           "PUT",
-          `/athlete/${client.athleteId}/gear/${segment(gear_id)}/reminder/${segment(reminder_id)}`,
-          { reset: String(reset), snoozeDays: "0" },
+          `${gearPath}/${segment(reminder_id)}`,
+          { reset: String(reset ?? false), snoozeDays: "0" },
           body
         )
       );
